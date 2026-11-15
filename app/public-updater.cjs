@@ -8,22 +8,39 @@ function createUpdater({app,notify}) {
   const publish = (phase, extra = {}) => notify({type:'updater',...(state={current,phase,...extra})})
   let autoUpdater
   let timer
+  let installRequested = false
   if (enabled) {
     ;({autoUpdater}=require('electron-updater'))
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = true
     autoUpdater.allowPrerelease = false
     autoUpdater.allowDowngrade = false
+    autoUpdater.disableWebInstaller = true
     autoUpdater.on('checking-for-update',()=>publish('checking'))
     autoUpdater.on('update-available',info=>publish('downloading',{available:info.version,percent:0}))
     autoUpdater.on('update-not-available',()=>publish('current'))
-    autoUpdater.on('download-progress',value=>publish('downloading',{percent:Math.round(value.percent)}))
-    autoUpdater.on('update-downloaded',info=>publish('ready',{available:info.version}))
+    autoUpdater.on('download-progress',value=>publish('downloading',{available:state.available,percent:Math.round(value.percent)}))
+    if (process.platform === 'darwin') {
+      // electron-updater emits its event before the macOS updater has staged the ZIP.
+      autoUpdater.on('update-downloaded',info=>publish('downloading',{available:info.version,percent:100}))
+      require('electron').autoUpdater.on('update-downloaded',()=>{
+        if (state.phase === 'downloading') publish('ready',{available:state.available})
+      })
+    } else {
+      autoUpdater.on('update-downloaded',info=>publish('ready',{available:info.version}))
+    }
     autoUpdater.on('error',()=>publish('error'))
   }
   async function check() {
-    if (autoUpdater && state.phase!=='ready' && state.phase!=='downloading') {
-      try { await autoUpdater.checkForUpdates() } catch { publish('error') }
+    if (autoUpdater && !['checking','ready','downloading'].includes(state.phase)) {
+      try {
+        const result = await autoUpdater.checkForUpdates()
+        result?.downloadPromise?.catch(()=>{
+          if (state.phase !== 'error') publish('error')
+        })
+      } catch {
+        if (state.phase !== 'error') publish('error')
+      }
     }
     return state
   }
@@ -36,6 +53,12 @@ function createUpdater({app,notify}) {
       }
     },
     check,
+    install() {
+      if (state.phase !== 'ready' || installRequested) return false
+      installRequested = true
+      setImmediate(()=>app.quit())
+      return true
+    },
   }
 }
 

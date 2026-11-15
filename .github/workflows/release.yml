@@ -8,18 +8,64 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desktop-release
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+      mac: ${{ steps.platforms.outputs.mac }}
+    steps:
+      - name: Select release platforms
+        id: platforms
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAC_RELEASE_ENABLED: ${{ vars.KINOTIX_MAC_RELEASE_ENABLED }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          if [[ "$REPOSITORY_PRIVATE" != "false" ]]; then
+            echo "The desktop update feed needs a public repository." >&2
+            exit 1
+          fi
+          export LATEST_RELEASE="$RUNNER_TEMP/kinotix-latest.json"
+          status="$(curl --silent --show-error --retry 2 --output "$LATEST_RELEASE" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest")"
+          case "$status" in
+            200) ;;
+            404) printf '{}\n' > "$LATEST_RELEASE" ;;
+            *) echo "Could not check the current release (HTTP $status)." >&2; exit 1 ;;
+          esac
+          node <<'NODE'
+          const fs = require('node:fs')
+          const previous = JSON.parse(fs.readFileSync(process.env.LATEST_RELEASE, 'utf8'))
+          const version = tag => /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag)?.slice(1).map(BigInt)
+          const next = version(process.env.GITHUB_REF_NAME)
+          if (!next) throw Error('Expected a stable vX.Y.Z release tag.')
+          if (previous.tag_name) {
+            const old = version(previous.tag_name)
+            const changed = next.findIndex((part, index) => part !== old?.[index])
+            if (!old || changed < 0 || next[changed] < old[changed]) {
+              throw Error('The tag must be newer than the latest stable release.')
+            }
+          }
+          const mac = process.env.MAC_RELEASE_ENABLED === 'true'
+          if (!mac && previous.assets?.some(asset => asset.name === 'latest-mac.yml')) {
+            throw Error('Enable KINOTIX_MAC_RELEASE_ENABLED to keep the existing macOS update feed working.')
+          }
+          const include = [{runner:'windows-2025', script:'windows'}]
+          if (mac) include.push({runner:'macos-15', script:'mac'})
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({include})}\nmac=${mac}\n`)
+          NODE
+
   build:
+    needs: plan
     strategy:
-      matrix:
-        include:
-          - runner: windows-2025
-            script: windows
-          - runner: macos-15
-            script: mac
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
@@ -63,6 +109,24 @@ jobs:
             : "${APPLE_ID:?Missing Apple ID}" "${APPLE_APP_SPECIFIC_PASSWORD:?Missing notarization credential}" "${APPLE_TEAM_ID:?Missing Apple Team ID}"
           fi
           npm run ${{ matrix.script }} --prefix windows
+      - name: Verify signed Windows build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          KINOTIX_WINDOWS_PUBLISHER: ${{ vars.KINOTIX_WINDOWS_PUBLISHER }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $paths = "dist/win-unpacked/KinoTix.exe", "dist/KinoTix-$version-Windows-x64-Setup.exe"
+          foreach ($path in $paths) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for ${path}: $($signature.Status)"
+            }
+            $publisher = $signature.SignerCertificate.GetNameInfo('SimpleName', $false)
+            if ($publisher -cne $env:KINOTIX_WINDOWS_PUBLISHER.Trim()) {
+              throw "The signing certificate does not match KINOTIX_WINDOWS_PUBLISHER for $path."
+            }
+          }
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.script }}
@@ -72,7 +136,7 @@ jobs:
             dist/latest*.yml
 
   release:
-    needs: build
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -86,17 +150,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          MAC_RELEASE_ENABLED: ${{ needs.plan.outputs.mac }}
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           files=(
             "dist/KinoTix-$version-Windows-x64-Setup.exe"
             "dist/KinoTix-$version-Windows-x64-Setup.exe.blockmap"
-            "dist/KinoTix-$version-macOS-universal.dmg"
-            "dist/KinoTix-$version-macOS-universal.zip"
             dist/latest.yml
-            dist/latest-mac.yml
           )
+          if [[ "$MAC_RELEASE_ENABLED" == "true" ]]; then
+            files+=(
+              "dist/KinoTix-$version-macOS-universal.dmg"
+              "dist/KinoTix-$version-macOS-universal.zip"
+              dist/latest-mac.yml
+            )
+          fi
           for file in "${files[@]}"; do test -s "$file"; done
-          gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --generate-notes --draft
+          if draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "$draft" != "true" ]]; then
+              echo "This release is already published." >&2
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --generate-notes --draft
+          fi
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

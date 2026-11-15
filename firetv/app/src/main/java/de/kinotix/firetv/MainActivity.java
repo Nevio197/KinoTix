@@ -527,6 +527,15 @@ public final class MainActivity extends Activity {
         if (first == null) {
             margin(body, text("Keine abspielbaren Videos gefunden.", 19, MUTED, false), 10);
         }
+        TvLibrary.Title title = detail;
+        Button remove = button("Aus Mediathek entfernen", () -> new AlertDialog.Builder(this)
+            .setTitle("Titel aus Mediathek entfernen?").setMessage(title.title)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("Entfernen", (dialog, which) -> runTask("Titel wird entfernt …", () -> {
+                library.remove(title);
+                return true;
+            }, result -> backFromDetail())).show());
+        actionLine(body, remove);
         focus(first != null ? first : back);
     }
 

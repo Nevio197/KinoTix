@@ -270,7 +270,10 @@ async function showHome(newPage = 1) {
     if (source.items.length) main.append(group(source.name,source.items,item=>openTitle(item)))
     else if (source.issue) {
       const issue = notice(source.name,source.issue,()=>showHome(page))
-      issue.querySelector('.actions').append(action('Andere Quelle hinzufügen',openImport))
+      const dns = source.issueCode === 'dns-blocked'
+      issue.querySelector('.actions').append(dns
+        ? action('Verbindungseinstellungen',showNetworkSettings)
+        : action('Andere Quelle hinzufügen',openImport))
       main.append(issue)
     }
   }
@@ -337,7 +340,8 @@ async function showAppSettings() {
   report.setAttribute('role','status')
   const tools = make('section','','settings-section')
   tools.append(iconAction('cloud','Google-Konto',showAccount,'settings-row'),
-    iconAction('grid','Kataloge',showCatalogs,'settings-row'))
+    iconAction('grid','Kataloge',showCatalogs,'settings-row'),
+    action('Verbindung',showNetworkSettings,'settings-row'))
   const updates = make('section','','settings-section')
   const progress = make('progress','','update-progress')
   progress.max = 100
@@ -364,6 +368,36 @@ async function showAppSettings() {
   dialog('Einstellungen',tools,updates)
   const state = await request('updates-state')
   if (report.isConnected) updateView?.(state)
+}
+async function showNetworkSettings() {
+  const explanation = make('p','Mit sicherem DNS löst KinoTix Webadressen in der App verschlüsselt über Cloudflare auf. Die Einstellung gilt auf diesem Gerät.')
+  const current = make('p')
+  current.setAttribute('role','status')
+  const label = make('label','','dns-option')
+  const setting = make('input')
+  setting.type = 'checkbox'
+  label.append(setting,make('span','Sicheres DNS verwenden'))
+  const restart = action('KinoTix neu starten',async()=>request('network-restart'),'primary')
+  const controls=make('div','','actions')
+  controls.append(action('Zurück',showAppSettings),restart)
+  const card=make('section','','settings-section')
+  card.append(explanation,label,current,controls)
+  function render(state) {
+    setting.checked=state.secureDns
+    restart.hidden=state.secureDns===state.active
+    current.textContent=restart.hidden
+      ? (state.active?'Sicheres DNS ist aktiv.':'KinoTix verwendet das DNS deines Systems.')
+      : 'Die Änderung wird beim nächsten Start wirksam.'
+  }
+  render(await request('network-state'))
+  setting.addEventListener('change',async()=>{
+    const next = setting.checked
+    setting.disabled=true
+    try { render(await request('network-set',{secureDns:next})) }
+    catch (error) { setting.checked=!next;current.textContent=cleanError(error) }
+    finally { setting.disabled=false }
+  })
+  dialog('Verbindung',card)
 }
 async function showCatalogs() {
   const state=await request('catalog-state')
@@ -655,16 +689,19 @@ const sourceResult = document.querySelector('#source-result')
 const sourceDetails = document.querySelector('#source-details')
 const sourceActions = document.querySelector('#source-actions')
 const sourceSave = document.querySelector('#source-save')
+const sourceNetwork = document.querySelector('#source-network')
 const sourceFile = document.querySelector('#file-open')
 let sourceRevision = 0
 let checkedSource
 
-function showSourceResult(kind, title, message) {
+function showSourceResult(kind, title, message, code) {
   sourceResult.hidden = false
   sourceResult.dataset.kind = kind
   sourceResult.querySelector('#source-kind').textContent = title
   sourceResult.querySelector('#source-message').textContent = message || ''
-  sourceActions.hidden = !checkedSource
+  sourceNetwork.hidden = code !== 'dns-blocked'
+  sourceSave.hidden = !checkedSource
+  sourceActions.hidden = sourceSave.hidden && sourceNetwork.hidden
   sourceDetails.hidden = checkedSource?.kind !== 'video'
 }
 function resetSourcePreview() {
@@ -690,7 +727,7 @@ async function checkSource() {
       video:'Video erkannt',catalog:result.name || 'KinoTix-Katalog erkannt',
       website:'Webseite erkannt',unreachable:'Quelle nicht erreichbar',invalid:'Adresse prüfen',
     }
-    showSourceResult(result.kind,titles[result.kind],result.message)
+    showSourceResult(result.kind,titles[result.kind],result.message,result.code)
     if (checkedSource) sourceSave.focus()
   } catch (error) {
     if (revision === sourceRevision) sourceFailure(error)
@@ -720,6 +757,10 @@ sourceURL.addEventListener('input',resetSourcePreview)
 sourceFile.addEventListener('click',()=>void chooseSourceFile())
 sourceSave.addEventListener('click',()=>{
   if (checkedSource) void addSource('source-add',{url:checkedSource.url,title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
+})
+sourceNetwork.addEventListener('click',()=>{
+  linkDialog.close()
+  void showNetworkSettings().catch(error=>dialog('Verbindung',make('p',cleanError(error))))
 })
 linkDialog.addEventListener('close',resetSourcePreview)
 document.querySelector('#catalog-open').addEventListener('click',()=>{

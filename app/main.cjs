@@ -7,7 +7,8 @@ const { openMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
-const { checkSource } = require('./source-check.cjs')
+const { checkSource, blockedHost } = require('./source-check.cjs')
+const { openNetworkSettings } = require('./network-settings.cjs')
 const { createUpdater } = require('./public-updater.cjs')
 const { autoSkip, destination, markerService, readSegments, segmentKey, timelineSegments } = require('./segments.js')
 const { controller, keyAction, fallbackVariant } = require('./playback-controls.cjs')
@@ -23,6 +24,7 @@ const webOptions = { sandbox: true, contextIsolation: true, nodeIntegration: fal
 const control = controller(playerScript)
 let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, folder
 let catalog, deviceCatalog, playbackRequest=0
+let networkSettings, networkRestartPending = false
 let sleepJob, sleepMinutes = null, sleepAtEnd = false
 let audio, audioSave
 let nextTimer, undoTimer
@@ -56,10 +58,15 @@ function makeCatalogView(partition,topHosts,resourceHosts) {
   contents.on('will-redirect',block)
   return contents
 }
-const catalogOptions={makeView:makeCatalogView,fetcher:(url,options)=>net.fetch(url,options)}
+const catalogOptions={
+  makeView:makeCatalogView,
+  fetcher:(url,options)=>net.fetch(url,options),
+  detectBlock:hostname=>networkSettings?.state().active ? false : blockedHost(hostname),
+}
 const getTitle=url=>decodeTitle(url)?catalog.detail(url):media.detail(url)
 const inspectSource=(url,target)=>checkSource(url,{
   fetcher:catalogOptions.fetcher,
+  detectBlock:catalogOptions.detectBlock,
   verifyCatalog:source=>target.check(source),
 })
 
@@ -436,6 +443,21 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (action === 'updates-state') return updater.state()
   if (action === 'updates-check') return updater.check()
   if (action === 'updates-install') return updater.install()
+  if (action === 'network-state') return networkSettings.state()
+  if (action === 'network-set') return networkSettings.set(payload.secureDns)
+  if (action === 'network-restart') {
+    const { secureDns, active } = networkSettings.state()
+    if (secureDns === active || quitting || networkRestartPending) return false
+    if (['checking','downloading','ready'].includes(updater.state().phase)) {
+      throw Error('Schließe zuerst das laufende Update ab. Die DNS-Einstellung gilt beim nächsten Start.')
+    }
+    networkRestartPending = true
+    setImmediate(() => {
+      app.relaunch()
+      app.quit()
+    })
+    return true
+  }
   if (action === 'sync-state') return sync.status()
   if (action === 'sync-sign-in') { await closePlayback(); return sync.signIn() }
   if (action === 'sync-sign-out') { await closePlayback(); return sync.signOut() }
@@ -565,9 +587,10 @@ function createWindow() {
 }
 app.on('second-instance', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus() } })
 app.whenReady().then(async () => {
-  session.fromPartition('kino-public-player').setPermissionRequestHandler((_contents,_permission,finish)=>finish(false))
   folder = app.getPath('userData')
   fs.mkdirSync(folder,{recursive:true})
+  networkSettings = openNetworkSettings(folder, app)
+  session.fromPartition('kino-public-player').setPermissionRequestHandler((_contents,_permission,finish)=>finish(false))
   library = deviceLibrary = openLibrary(folder)
   media = openMedia(folder)
   catalog = deviceCatalog = openCatalog(folder,catalogOptions)

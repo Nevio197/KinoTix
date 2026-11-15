@@ -40,7 +40,7 @@ function httpIssue(status) {
 }
 
 async function networkIssue(error, url, detectBlock = blockedHost) {
-  if (await detectBlock(url.hostname)) return {code:'blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}
+  if (await detectBlock(url.hostname)) return {code:'dns-blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}
   const detail = [error?.name,error?.code,error?.message,error?.cause?.code].filter(Boolean).join(' ')
   if (/cert|ssl|tls|certificate/i.test(detail)) return {code:'certificate',message:'Die sichere Verbindung zur Quelle konnte nicht aufgebaut werden.'}
   if (/NAME_NOT_RESOLVED|ENOTFOUND|EAI_AGAIN/i.test(detail)) return {code:'dns',message:'Der Name der Quelle konnte in diesem Netz nicht gefunden werden.'}
@@ -51,7 +51,7 @@ async function networkIssue(error, url, detectBlock = blockedHost) {
 async function request(url, fetcher, signal, detectBlock) {
   let target = url
   for (let count = 0; count < 6; count++) {
-    if (await detectBlock(target.hostname)) return {issue:{code:'blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}}
+    if (await detectBlock(target.hostname)) return {issue:{code:'dns-blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}}
     let response
     try {
       response = await fetcher(target.href,{redirect:'manual',credentials:'omit',cache:'no-store',signal})

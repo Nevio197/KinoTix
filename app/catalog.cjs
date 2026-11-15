@@ -93,7 +93,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost}) {
     const url=safeURL(address)
     if (!url) throw Error('Die Quelle hat eine ungültige Adresse.')
     if (rules.listing && await detectBlock(url.hostname)) {
-      throw sourceError('blocked','Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.')
+      throw sourceError('dns-blocked','Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.')
     }
     const mainHosts=rules.player?[...source.playerHosts,...source.mediaHosts]:
       [new URL(source.origin).hostname,...source.catalogHosts]

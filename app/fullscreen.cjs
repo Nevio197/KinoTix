@@ -1,7 +1,7 @@
 function createFullscreen(win) {
-  let player, inline, requested
+  let player, inline, requested, queued
   let native = win.isFullScreen()
-  let exitWhenEntered = false
+  let playerRequestedFullscreen = false
   let state = {}
   const isFullscreen = () => native || requested === true
   const snapshot = () => ({...state,fullscreen:isFullscreen()})
@@ -19,40 +19,46 @@ function createFullscreen(win) {
       height:Math.max(0,Math.min(box.height,height-box.y))})
   }
   function transition(value) {
-    if (requested !== undefined || native === value) return false
+    if (requested !== undefined) {
+      queued=value===requested ? undefined : value
+      return true
+    }
+    if (native === value) return false
     requested=value
     win.setFullScreen(value)
     layout()
     publish()
     return true
   }
-  win.on('enter-full-screen',()=>{
-    native=true
+  function nativeChanged(value) {
+    native=value
     requested=undefined
-    if (exitWhenEntered) { exitWhenEntered=false; transition(false) }
-    else { layout(); publish() }
-  })
-  win.on('leave-full-screen',()=>{
-    native=false
-    requested=undefined
+    const next=queued
+    queued=undefined
+    if (!native) playerRequestedFullscreen=false
+    if (next!==undefined && transition(next)) {
+      if (next) playerRequestedFullscreen=true
+      return
+    }
     layout()
     publish()
-  })
+  }
+  win.on('enter-full-screen',()=>nativeChanged(true))
+  win.on('leave-full-screen',()=>nativeChanged(false))
   win.on('resize',layout)
   return {
     attach(view,data) {
       player=view
       state=data
       layout()
-      view.webContents.on('did-finish-load',publish)
+      view.webContents.once('did-finish-load',()=>{ if (player===view) publish() })
       if (isFullscreen()) view.webContents.focus()
     },
     detach(exit) {
       player=undefined
       if (exit) {
         inline=undefined
-        if (requested===true) exitWhenEntered=true
-        else if (native) transition(false)
+        if (playerRequestedFullscreen || process.platform!=='darwin' && isFullscreen()) transition(false)
       }
     },
     bounds(box) {
@@ -64,8 +70,13 @@ function createFullscreen(win) {
     update(values) { state={...state,...values}; publish() },
     snapshot,
     contains: sender => player?.webContents===sender,
-    toggle:()=>Boolean(player) && transition(!isFullscreen()),
-    escape:()=>isFullscreen() && transition(false),
+    toggle() {
+      if (!player) return false
+      const enter=!(queued ?? requested ?? native)
+      if (enter) playerRequestedFullscreen=true
+      return transition(enter)
+    },
+    escape:()=>Boolean(player) && isFullscreen() && transition(false),
   }
 }
 

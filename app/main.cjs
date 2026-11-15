@@ -151,6 +151,7 @@ function updateOutputMute(info) {
 }
 function videoCommand(action, value) {
   if (action === 'fullscreen') return fullscreen.toggle()
+  if (action === 'exit-fullscreen') return fullscreen.escape()
   if (action === 'mute' || action === 'volume' || action === 'set-volume') {
     if (action !== 'mute' && !Number.isFinite(value)) return false
     const level = action === 'mute' ? audio.level : action === 'volume' ? audio.level + value : value
@@ -184,7 +185,7 @@ async function checkpoint(info = playback) {
   if (!info?.frame || !info.resumed) return
   const frame = info.frame
   const value = await frame.executeJavaScript(readVideo).catch(() => null)
-  if (playback !== info || !value || value.error || !Number.isFinite(value.duration) ||
+  if (playback !== info || !value || value.error || value.seeking || !Number.isFinite(value.duration) ||
       value.time < 0 || !Number.isFinite(value.time)) return
   info.lastObserved = value
   if (value.time !== info.lastSaved || value.paused !== info.paused || value.ended !== info.ended) {
@@ -220,7 +221,7 @@ function bindAccount(id) {
   fs.mkdirSync(location,{recursive:true})
   library = id ? openLibrary(location) : deviceLibrary
   catalog = id ? openCatalog(location,catalogOptions) : deviceCatalog
-  notify({type:'library'})
+  notify({type:'account-library'})
 }
 
 function setSleep(input) {
@@ -271,7 +272,7 @@ async function switchVariant(info, action, value) {
 }
 function resumeDetails(info, current=info.lastObserved) {
   return {...info.request,position:current?.time ?? info.resumePosition,
-    autoplay:current ? !current.paused : info.request.autoplay,skipped:info.skipped}
+    autoplay:current ? !current.paused : info.request.autoplay,skipped:info.skipped,audioChoice:info.audioChoice}
 }
 function recoverVariant(info, mediaFailed = false) {
   if (playback!==info || info.requestID!==playbackRequest || info.failed) return false
@@ -312,7 +313,7 @@ async function poll(info, view, token) {
       if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
       return
     }
-    const stalled=value.seeking || (!value.ended && !value.paused &&
+    const stalled=value.seeking || (!info.resumed && value.readyState<2) || (!value.ended && !value.paused &&
       (value.readyState<2 || Math.abs(value.time-(info.lastObserved?.time ?? -1))<.05))
     if (stalled) {
       if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
@@ -333,10 +334,15 @@ async function poll(info, view, token) {
     }
     if (!info.resumed) {
       const resume = Math.min(info.resumePosition,Math.max(0,value.duration-.1))
-      if (resume>0) await control(frame,'seek',resume)
+      if (value.readyState<2 || value.seeking) return
+      if (resume>0 && !info.resumeRequested) {
+        info.resumeRequested=true
+        if (!await control(frame,'seek',resume) && token===playToken) recoverVariant(info)
+        return
+      }
       if (token!==playToken) return
       info.resumed = true
-      info.lastObserved={...value,time:resume,paused:info.request.autoplay===false}
+      info.lastObserved={...value,paused:info.request.autoplay===false}
       fullscreen.update({ready:true})
       if (info.request.autoplay!==false) void control(frame,'play')
       return
@@ -387,7 +393,8 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
   if (!variant) throw Error('Diese Quelle oder Qualitätsstufe ist nicht verfügbar.')
   stop(false)
   player = new WebContentsView({webPreferences:{...webOptions,enableBlinkFeatures:'AudioVideoTracks',
-    partition:'kino-public-player',preload:path.join(__dirname,'preload.cjs')}})
+    partition:'kino-public-player',preload:path.join(__dirname,'preload.cjs'),
+    ...(process.platform==='darwin' ? {backgroundThrottling:false} : {})}})
   player.setBackgroundColor('#000000')
   const view = player.webContents
   view.setWindowOpenHandler(()=>({action:'deny'}))
@@ -399,6 +406,7 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
     previous && !previous.finished?previous.time:0
   const info = playback = {contents:view,audioReady:false,title,episode,profile,selection,
     skipped:details.skipped instanceof Set ? details.skipped : new Set(),request:details,requestID,resumePosition,
+    audioChoice:details.audioChoice,
     attempted:details.attempted instanceof Set ? details.attempted : new Set(),resumed:false,lastSaved:0,
     mediaURL:variant.url,startedWithSecureDns:networkSettings.state().secureActive,
     stalledAt:Date.now(),markers:readSegments(null,local)}
@@ -414,7 +422,8 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
   fullscreen.attach(player,{title:title.title+(title.isSeries?' · S'+episode.season+' F'+episode.episode:''),audio,
     sources:episode.sources.map(value=>({name:value.name,heights:value.variants.map(item=>item.height)})),
     ...selection,next:Boolean(nextEpisode(info)),sleep:sleepAtEnd?'episode':sleepMinutes,segments:[],
-    notice:details.notice ?? null,audioLanguage:deviceLibrary.audioLanguage()})
+    notice:details.notice ?? null,audioChoice:info.audioChoice,audioLanguage:deviceLibrary.audioLanguage(),
+    macOS:process.platform==='darwin'})
   void view.loadFile(path.join(__dirname,'media.html'),{hash:encodeURIComponent(variant.url)})
     .catch(()=>{if (token===playToken) recoverVariant(info)})
   timer=setInterval(()=>void poll(info,view,token).catch(()=>{}),750)
@@ -442,16 +451,19 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
       return videoCommand('seek',time)
     }
     if (payload.action === 'source' || payload.action === 'quality') return switchVariant(playback,payload.action,payload.value)
-    if (payload.action === 'audio-language') {
-      if (typeof payload.value!=='string') return false
-      const language=payload.value.trim().toLowerCase()
+    if (payload.action === 'audio-track') {
+      if (!playback || !payload.value || typeof payload.value.language!=='string' ||
+          typeof payload.value.label!=='string' || !Number.isInteger(payload.value.index) ||
+          payload.value.index<0 || payload.value.index>255) return false
+      const language=payload.value.language.trim().toLowerCase()
       if (language && (language.length>40 || !/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(language))) return false
-      deviceLibrary.setAudioLanguage(language)
-      fullscreen.update({audioLanguage:language})
+      playback.audioChoice={language,label:payload.value.label.trim().slice(0,100),index:payload.value.index}
+      if (language) deviceLibrary.setAudioLanguage(language)
+      fullscreen.update({audioChoice:playback.audioChoice,audioLanguage:deviceLibrary.audioLanguage()})
       return true
     }
     if (payload.action === 'sleep') return setSleep(payload.value)
-    if (['toggle','jump','seek','set-volume','mute','volume','fullscreen'].includes(payload.action)) return videoCommand(payload.action,payload.value)
+    if (['toggle','jump','seek','set-volume','mute','volume','fullscreen','exit-fullscreen'].includes(payload.action)) return videoCommand(payload.action,payload.value)
     return false
   }
   if (!win || event.sender !== win.webContents || event.senderFrame?.url !== win.webContents.getURL()) throw Error('Zugriff verweigert.')
@@ -591,7 +603,7 @@ function createWindow() {
   })
   let closing = false
   win.on('close', event => {
-    if (closing) return
+    if (closing || quitting) return
     event.preventDefault()
     closing = true
     void closePlayback().finally(() => {
@@ -623,12 +635,12 @@ app.whenReady().then(async () => {
   try { config=JSON.parse(fs.readFileSync(path.join(__dirname,'supabase.json'),'utf8')) } catch {}
   sync = createAccountSync({folder,safeStorage,openExternal:url=>shell.openExternal(url),bind:bindAccount,apply:applyProgress,
     applyCatalogs:items=>{if(catalog.apply(items)) notify({type:'library'})},notify,config})
-  await sync.start()
   updater = createUpdater({app,notify})
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role:'appMenu' }, { role:'editMenu' }, { role:'viewMenu', submenu:[{ role:'togglefullscreen' }] }, { role:'windowMenu' },
   ]))
   createWindow()
+  void sync.start()
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow() })
 })
 let quitting = false

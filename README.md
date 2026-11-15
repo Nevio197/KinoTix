@@ -2,13 +2,13 @@
 
 Desktop-Videoplayer für Windows x64 und macOS. Unter **Hinzufügen** kannst du eine Webadresse prüfen oder eine Datei auswählen. KinoTix erkennt unterstützte Videolinks, [Medienlisten](examples/medienliste.json) und [Kataloge](docs/KATALOGE.md). Die Mediathek ist auch im Gastmodus verfügbar.
 
-**[KinoTix für Windows herunterladen](https://github.com/Nevio197/KinoTix/releases/latest)**. Installiere den GitHub-Build einmal, um automatische Updates einzuschalten. Für macOS stehen der native Gerätetest und das signierte Release aus.
+**[KinoTix für Windows herunterladen](https://github.com/Nevio197/KinoTix/releases/latest)**. Installiere den GitHub-Build einmal, um automatische Updates einzuschalten. Für macOS gibt es einen lokal erstellbaren Universal-Build ab macOS 13. Das signierte GitHub-Release für macOS steht aus.
 
 Auf der Startseite zeigt **Weiterschauen** den Fortschritt und die Restlaufzeit. Der Player bietet eine Bildvorschau und Zeitmarken auf der Zeitleiste, Lautstärke, Bild-in-Bild, Schlaftimer und Vollbild. Bei verfügbaren Alternativen kann KinoTix nach einem Wiedergabefehler die Quelle wechseln. Tonspurwahl, Qualität und nächste Folge erscheinen bei passenden Medien. [Zeitmarken für Intro und Abspann](docs/ZEITMARKEN.md)
 
 Bei Problemen mit der Namensauflösung versucht KinoTix automatisch einen zweiten Zugriff über verschlüsseltes DNS. Unter **Einstellungen → Verbindung** kannst du den Modus ändern. [Quellen und Verbindung](docs/KATALOGE.md)
 
-Katalogimport, Wiedergabe, Quellenwechsel, Zeitleistenvorschau und Tonspurwahl sind auf Windows geprüft. Google-Anmeldung und die Verbindung zum Supabase-Projekt wurden auf Windows live getestet. Der [MacBook-Auftrag](docs/MAC-AUFTRAG.md) beschreibt die ausstehenden Mac- und geräteübergreifenden Tests.
+Katalogimport, Wiedergabe, Quellenwechsel, Zeitleistenvorschau und Tonspurwahl wurden unter Windows und unter macOS auf Apple Silicon geprüft. Google-Anmeldung und die Verbindung zum Supabase-Projekt wurden auf Windows live getestet. Die [Mac-Testübersicht](docs/MAC-AUFTRAG.md) dokumentiert den Prüfumfang und die offenen geräteübergreifenden Tests.
 
 ## Ohne Konto oder mit Google
 
@@ -24,7 +24,7 @@ npm ci --ignore-scripts --prefix windows
 npm run windows --prefix windows
 ```
 
-Auf dem Mac den letzten Befehl durch `npm run mac --prefix windows` ersetzen. Installer liegen danach in `dist/`.
+Auf dem Mac den letzten Befehl durch `npm run mac:local --prefix windows` ersetzen. Das erzeugt eine Universal-App für Apple Silicon und Intel sowie DMG und ZIP in `dist/`. Für einen kleineren Build nur für die Architektur des Baurechners gibt es `npm run mac:native --prefix windows`. Beide Builds sind ad hoc signiert und für lokale Tests ohne Update-Kanal gedacht. Für die Installation das DMG öffnen und **KinoTix** nach **Programme** ziehen.
 
 ## Updates und öffentliche Releases
 
@@ -34,6 +34,6 @@ Der Release-Workflow baut bei Tags `vX.Y.Z`, die zu `app/package.json` passen, z
 
 Hinterlege im öffentlichen KinoTix-Repository die Actions-Variablen `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` und `KINOTIX_WINDOWS_UPDATE_PUBLIC_KEY`. Der öffentliche Schlüssel wird als Base64-kodierter DER-Schlüssel (SPKI) gespeichert. Hinterlege den passenden privaten PEM-Schlüssel Base64-kodiert als Actions-Secret `KINOTIX_WINDOWS_UPDATE_PRIVATE_KEY`. Behalte denselben Schlüssel für Folgeversionen, damit bereits installierte Builds neue Releases erkennen. Die optionalen Secrets `WINDOWS_CSC_LINK`, `WINDOWS_CSC_PASSWORD` und die Variable `KINOTIX_WINDOWS_PUBLISHER` konfigurieren zusätzlich eine Windows-Authenticode-Signatur.
 
-Sobald der Mac-Build und seine Updates geprüft sind, setze zusätzlich `KINOTIX_MAC_RELEASE_ENABLED=true` und hinterlege `APPLE_TEAM_ID` als Actions-Variable. Ergänze die Secrets `MAC_CSC_LINK`, `MAC_CSC_PASSWORD`, `APPLE_ID` und `APPLE_APP_SPECIFIC_PASSWORD`. Ab der ersten macOS-Veröffentlichung müssen neue stabile Releases beide Plattformen samt Update-Dateien enthalten, weil beide Apps dasselbe aktuelle GitHub-Release lesen. Der Mac verwendet Developer ID und Apple-Notarisierung. [Electron-Builder zu Auto-Updates](https://www.electron.build/v26/docs/features/auto-update/)
+Für den offiziellen Mac-Build setze `KINOTIX_MAC_RELEASE_ENABLED=true` und hinterlege `APPLE_TEAM_ID` als Actions-Variable. In `MAC_CSC_LINK` und `MAC_CSC_PASSWORD` kommt das exportierte **Developer ID Application**-Zertifikat mit privatem Schlüssel samt Passwort. `APPLE_ID` und `APPLE_APP_SPECIFIC_PASSWORD` erlauben die Apple-Notarisierung. Der Workflow prüft beide Architekturen, das Signaturteam, das Notarisierungsticket der App und die Update-Dateien. Behalte bei Folgeversionen App-ID und Apple-Team bei. Ab der ersten macOS-Veröffentlichung müssen stabile Releases beide Plattformen samt Update-Dateien enthalten, weil beide Apps dasselbe aktuelle GitHub-Release lesen. Der Mac liefert Universal-DMG, -ZIP, ZIP-Blockmap und `latest-mac.yml`. [Apple zu Developer ID](https://developer.apple.com/developer-id/) · [Electron-Builder zu Auto-Updates](https://www.electron.build/v26/docs/features/auto-update/)
 
 Lokale Builds ohne Update-Konfiguration haben keinen Update-Kanal. Installiere für automatische Updates einmal den dafür konfigurierten GitHub-Build. Teste den Wechsel zwischen zwei Versionen pro Plattform.

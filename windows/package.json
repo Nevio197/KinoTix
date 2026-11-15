@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "windows": "electron-builder --config build-config.cjs --win --x64 --publish never",
-    "mac": "electron-builder --config build-config.cjs --mac --universal --publish never"
+    "mac": "electron-builder --config build-config.cjs --mac --universal --publish never",
+    "mac:local": "env -u CSC_LINK -u CSC_KEY_PASSWORD -u CSC_NAME KINOTIX_MAC_LOCAL=1 electron-builder --config build-config.cjs --mac --universal --publish never",
+    "mac:native": "env -u CSC_LINK -u CSC_KEY_PASSWORD -u CSC_NAME KINOTIX_MAC_LOCAL=1 electron-builder --config build-config.cjs --mac --publish never"
   },
   "devDependencies": {
     "electron-builder": "26.18.0"

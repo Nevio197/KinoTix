@@ -74,9 +74,9 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
   const project=validConfig(config)
   const filename=path.join(folder,'account.json')
   const stored=read(filename)
-  let account,session,timer,timerDue=0,flight,signingIn=false,active=true,issue='',lastSync=null
+  let account,session,timer,timerDue=0,flight,signingIn=false,restoring=false,active=true,issue='',lastSync=null
   let pending=new Map(),downloaded=new Map()
-  const status=()=>({configured:Boolean(project),connected:Boolean(account),signingIn,lastSync,issue,email:account?.email ?? ''})
+  const status=()=>({configured:Boolean(project),connected:Boolean(account),signingIn,restoring,lastSync,issue,email:account?.email ?? ''})
   const emit=()=>notify({type:'sync',...status()})
   const pendingFile=owner=>path.join(folder,'pending-'+owner.id+'.json')
   function schedule(ms) {
@@ -199,7 +199,7 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
     recordCatalog(value) { queue('catalog',catalogRecord(value)) },
     async signIn() {
       if (!project) throw Error('Das Supabase-Projekt ist für diesen Build noch nicht eingerichtet.')
-      if (signingIn || account) return status()
+      if (signingIn || restoring || account) return status()
       signingIn=true;issue='';emit()
       try {
         if (!await safeStorage.isAsyncEncryptionAvailable()) throw Error('Der geschützte Speicher ist nicht verfügbar.')
@@ -217,14 +217,24 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
       return status()
     },
     async start() {
-      if (!project || stored?.project!==project.url || !uuid.test(stored.id)) return
+      if (!project || !active || restoring || signingIn || account || stored?.project!==project.url || !uuid.test(stored.id)) return
+      restoring=true
+      emit()
       try {
         const decrypted=await safeStorage.decryptStringAsync(Buffer.from(stored.refresh,'base64'))
-        if (active && !decrypted.isTemporarilyUnavailable && decrypted.result) {
-          session={refresh:decrypted.result,until:0}
-          select({id:stored.id,email:stored.email})
+        if (!active) return
+        if (decrypted.isTemporarilyUnavailable || !decrypted.result) {
+          issue='Die gespeicherte Anmeldung ist gerade nicht verfügbar. Öffne den geschützten Speicher oder melde dich erneut an.'
+          return
         }
-      } catch {issue='Die gespeicherte Anmeldung konnte nicht geöffnet werden.';emit()}
+        session={refresh:decrypted.result,until:0}
+        select({id:stored.id,email:stored.email})
+      } catch {
+        if (active) issue='Die gespeicherte Anmeldung konnte nicht geöffnet werden.'
+      } finally {
+        restoring=false
+        emit()
+      }
     },
     signOut() {
       fs.rmSync(filename,{force:true})

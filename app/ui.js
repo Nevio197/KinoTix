@@ -447,6 +447,7 @@ async function showAccount() {
       content.append(make('p','Ohne Konto bleiben Kataloge, Merkliste und Verlauf auf diesem Gerät. Mit Google kannst du Kataloge und Wiedergabestand zwischen Windows und Mac synchronisieren.'))
       if (state.issue) content.append(make('p',state.issue,'inline-error'))
       if (!state.configured) content.append(make('p','Die Google-Anmeldung ist für diesen Build noch nicht eingerichtet.'))
+      else if (state.restoring) content.append(make('p','Die gespeicherte Anmeldung wird geöffnet …'))
       else if (state.signingIn) content.append(make('p','Schließe die Anmeldung im Browser ab.'))
       else content.append(action('Mit Google anmelden',async()=>{
         const next=await request('sync-sign-in')
@@ -648,6 +649,7 @@ async function play(episode) {
 status(message => {
   if (message.type === 'updater') { if (settings.open) updateView?.(message); return }
   if (message.type === 'sync') { if(settings.open) syncView?.(message); return }
+  if (message.type === 'account-library') { void showHome(); return }
   if (message.type === 'library') { if (!active && document.querySelector('#main .home-catalog')) void showHome(page); return }
   if (active && message.type==='player-back') void openTitle(detail)
 })

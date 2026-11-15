@@ -20,6 +20,7 @@ video { display: block; width: 100vw; height: 100vh; object-fit: contain; backgr
 #controls { position: fixed; inset: 0; pointer-events: none; opacity: 1; transition: opacity 190ms ease; }
 #controls.asleep { opacity: 0; }
 #controls.asleep :is(button, input, select, .panel) { pointer-events: none; }
+body.mac-player:has(#controls.asleep) video { cursor: none; }
 .top, .bottom { position: absolute; inset-inline: 0; }
 .top {
   top: 0;

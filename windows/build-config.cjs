@@ -1,4 +1,5 @@
-const repository = process.env.KINOTIX_PUBLIC_REPOSITORY
+const localMac = process.platform === 'darwin' && process.env.KINOTIX_MAC_LOCAL === '1'
+const repository = localMac ? undefined : process.env.KINOTIX_PUBLIC_REPOSITORY
 if (repository && !/^[\w.-]+\/[\w.-]+$/.test(repository)) {
   throw Error('KINOTIX_PUBLIC_REPOSITORY muss OWNER/REPO enthalten.')
 }
@@ -24,7 +25,9 @@ module.exports = {
     icon:'../assets/KinoTix.icns',
     target:['dmg','zip'],
     category:'public.app-category.entertainment',
-    hardenedRuntime:true,
+    hardenedRuntime:Boolean(repository),
+    notarize:Boolean(repository),
+    ...(!repository ? {identity:'-'} : {}),
     artifactName:'KinoTix-${version}-macOS-${arch}.${ext}',
   },
 }

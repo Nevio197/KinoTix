@@ -299,8 +299,11 @@ final class TvUpdates implements AutoCloseable {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void verifyApk(File file, String version) throws PackageManager.NameNotFoundException, IOException {
-        int flags = Build.VERSION.SDK_INT >= 28 ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
+        int flags = PackageManager.GET_SIGNATURES;
+        // Android 9 only collects certificates for an archive when GET_SIGNATURES is set.
+        if (Build.VERSION.SDK_INT >= 28) flags |= PackageManager.GET_SIGNING_CERTIFICATES;
         PackageInfo current = currentPackage(flags);
         PackageInfo candidate = activity.getPackageManager().getPackageArchiveInfo(file.getAbsolutePath(), flags);
         if (candidate == null || !current.packageName.equals(candidate.packageName) || !version.equals(candidate.versionName)

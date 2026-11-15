@@ -36,4 +36,18 @@ function chooseQuality(variants, estimate, preference) {
     qualityTargets.find(target => estimate >= target.rate)?.height ?? 360
   return options.find(item => item.height <= limit) ?? options.at(-1)
 }
-module.exports = { controller, keyAction, chooseQuality }
+
+function fallbackVariant(sources, selection, attempted) {
+  const {source,quality} = selection
+  const height = sources[source].variants[quality].height
+  const order = sources.map((_,index) => index).filter(index => index!==source)
+  for (const nextSource of [...order,source]) {
+    const variants = sources[nextSource].variants
+    const matching = variants.findIndex(variant => variant.height===height && !attempted.has(variant.url))
+    const nextQuality = matching !== -1 ? matching : variants.findIndex(variant=>!attempted.has(variant.url))
+    if (nextQuality !== -1) return {source:nextSource,quality:nextQuality}
+  }
+  return null
+}
+
+module.exports = { controller, keyAction, chooseQuality, fallbackVariant }

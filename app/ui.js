@@ -5,7 +5,6 @@ const query = document.querySelector('#query')
 const linkDialog = document.querySelector('#link-dialog')
 let viewId = 0
 let page = 1
-let homeItems = []
 let history = []
 let library
 let updateView
@@ -31,20 +30,137 @@ function action(text, handler, classes) {
   }))
   return node
 }
+function icon(name) {
+  const namespace = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(namespace,'svg')
+  const use = document.createElementNS(namespace,'use')
+  svg.classList.add('icon')
+  svg.setAttribute('aria-hidden','true')
+  use.setAttribute('href','#icon-'+name)
+  svg.append(use)
+  return svg
+}
+function iconAction(name, text, handler, classes, showLabel = true) {
+  const button = action(showLabel ? text : '',handler,classes)
+  if (!showLabel) {
+    button.setAttribute('aria-label',text)
+    button.title = text
+  }
+  button.prepend(icon(name))
+  return button
+}
+function imageFor(item, className = '', loading = 'lazy') {
+  const image = make('img','',className)
+  image.alt = ''
+  image.loading = loading
+  image.referrerPolicy = 'no-referrer'
+  image.src = item.poster
+  return image
+}
 function art(item) {
   const container = make('span', '', 'card-art')
   if (!item.poster) {
-    container.textContent = '▶'
+    container.append(icon('play'))
     return container
   }
-  const image = make('img')
-  image.alt = ''
-  image.loading = 'lazy'
-  image.referrerPolicy = 'no-referrer'
-  image.src = item.poster
-  image.addEventListener('error', () => { container.textContent = '▶' }, { once:true })
+  const image = imageFor(item)
+  image.addEventListener('error', () => { container.replaceChildren(icon('play')) }, { once:true })
   container.append(image)
   return container
+}
+const lastEpisode = item => item?.last && item.episodes?.[item.last]
+function progressFor(item) {
+  const episode = lastEpisode(item)
+  return episode && !episode.finished && episode.time > 0 && episode.time < episode.duration ? episode : null
+}
+function progressBar(episode, classes) {
+  const rail = make('progress', '', classes)
+  rail.max = episode.duration
+  rail.value = episode.time
+  rail.setAttribute('aria-label','Wiedergabefortschritt')
+  return rail
+}
+function historyText(item) {
+  const previous = lastEpisode(item)
+  if (!previous) return ''
+  const [season,episode] = item.last.split(':')
+  if (item.isSeries) return 'Staffel ' + season + ' · Folge ' + episode
+  return previous.finished ? 'Gesehen' : ''
+}
+function remaining(episode) {
+  const minutes = Math.ceil((episode.duration - episode.time) / 60)
+  if (minutes < 60) return 'Noch ' + minutes + ' Min.'
+  const hours = Math.floor(minutes / 60)
+  return 'Noch ' + hours + ' Std.' + (minutes % 60 ? ' ' + minutes % 60 + ' Min.' : '')
+}
+function heroArtwork(hero, item) {
+  if (!item.poster) return
+  const background = imageFor(item,'hero-media','eager')
+  const poster = imageFor(item,'hero-poster','eager')
+  hero.classList.add('has-art')
+  background.addEventListener('error', () => {
+    hero.classList.remove('has-art')
+    background.remove()
+    poster.remove()
+  }, { once:true })
+  hero.append(background,poster)
+}
+function feature(item, episode = null) {
+  const hero = make('section','','hero')
+  heroArtwork(hero,item)
+  const body = make('div','','hero-content')
+  if (episode) body.append(make('p','Weiterschauen','eyebrow'))
+  body.append(make('h1',item.title,'hero-title'))
+  const meta = episode ? historyText(item) : (item.isSeries ? 'Serie' : 'Film')
+  if (meta) body.append(make('p',meta,'hero-meta'))
+  if (episode) {
+    const position = make('div','','progress-block')
+    position.append(progressBar(episode),make('span',remaining(episode),'remain'))
+    body.append(position)
+  }
+  const controls = make('div','','actions')
+  if (episode) controls.append(
+    iconAction('play','Fortsetzen',()=>openTitle(item,true),'primary'),
+    action('Details',()=>openTitle(item)),
+    iconAction('close','Aus Weiterschauen entfernen',async()=>{
+      await request('hide',{url:item.url})
+      await showHome(page)
+    },'icon-button',false)
+  )
+  else controls.append(action('Details öffnen',()=>openTitle(item),'primary'))
+  body.append(controls)
+  hero.append(body)
+  return hero
+}
+function emptyLibrary() {
+  const hero = make('section','','hero')
+  const body = make('div','','hero-content')
+  body.append(make('h1','Deine Mediathek'),make('p','Füge ein Video, eine Medienliste oder einen eigenen Katalog hinzu.','lead'))
+  const controls = make('div','','actions')
+  controls.append(iconAction('plus','Medium hinzufügen',()=>openImport(),'primary'))
+  body.append(controls)
+  hero.append(body)
+  return hero
+}
+function importShelf() {
+  const section = make('section','','import-shelf')
+  const grid = make('div','','import-cards')
+  const choices = [
+    ['file','Datei oder Liste','Video oder JSON-Medienliste vom Gerät',()=>{openImport();return addMedia(true)}],
+    ['link','Videolink','Direkte HTTPS-Adresse eines Videos',openImport],
+    ['grid','Katalog','Eigene Medienquelle per Katalogdatei',showCatalogs],
+  ]
+  for (const [name,title,description,open] of choices) {
+    const button = action('',open,'import-card')
+    const symbol = make('span','','import-icon')
+    symbol.append(icon(name))
+    const label = make('span',title,'import-label')
+    label.append(make('span',description))
+    button.append(symbol,label,icon('chevron'))
+    grid.append(button)
+  }
+  section.append(make('h2','Medien hinzufügen','section-title'),grid)
+  return section
 }
 function group(title, items, callback, isHistory = false) {
   const section = make('section')
@@ -59,15 +175,16 @@ function group(title, items, callback, isHistory = false) {
       if (labelText) label.append(make('span',labelText,'caption'))
     }
     if (isHistory) {
-      const [s,e] = item.last.split(':')
-      const previous = item.episodes[item.last]
-      label.append(make('span', item.isSeries ? 'Staffel ' + s + ' · Folge ' + e + (previous.finished ? ' gesehen' : '') : previous.finished ? 'Gesehen' : formatTime(previous.time), 'caption'))
+      const position = progressFor(item)
+      const caption = [historyText(item), position ? remaining(position) : ''].filter(Boolean).join(' · ')
+      if (caption) label.append(make('span',caption,'caption'))
+      if (position) label.append(progressBar(position,'history-progress'))
     }
     card.append(art(item), label)
     if (isHistory) {
       const shell = make('div','','history-card')
-      const remove = action('×', async () => { await request('hide',{url:item.url}); await showHome(page) },'history-remove')
-      remove.setAttribute('aria-label','Aus Weiterschauen entfernen – '+item.title)
+      const remove = iconAction('close','Aus Weiterschauen entfernen – '+item.title,
+        async () => { await request('hide',{url:item.url}); await showHome(page) },'history-remove',false)
       shell.append(card,remove)
       grid.append(shell)
     } else grid.append(card)
@@ -88,10 +205,13 @@ function notice(title, description, retry) {
 async function refreshLibrary() {
   library = await request('library')
   history = library.history
-  document.querySelector('#profile').textContent = library.profile.name
+  const profile = document.querySelector('#profile')
+  profile.querySelector('.profile-name').textContent = library.profile.name
+  profile.querySelector('.profile-avatar').textContent = [...library.profile.name.trim()][0]?.toLocaleUpperCase('de-DE') || 'M'
+  profile.setAttribute('aria-label','Profile · '+library.profile.name)
   return library
 }
-function reset() {
+function reset(section = main.dataset.section || 'home') {
   viewId += 1
   observePlayer?.disconnect()
   observePlayer = null
@@ -100,45 +220,58 @@ function reset() {
     void request('close')
   }
   main.className = ''
+  main.dataset.section = section
+  for (const button of document.querySelectorAll('.main-nav [data-section]')) {
+    if (button.dataset.section === section) button.setAttribute('aria-current','page')
+    else button.removeAttribute('aria-current')
+  }
   main.replaceChildren()
   main.scrollTop = 0
   return viewId
 }
-async function showHome(newPage = 1, refresh = false) {
-  const id = reset()
+async function showHome(newPage = 1) {
+  const id = reset('home')
   returnTo = () => showHome()
-  if (newPage !== page || refresh) homeItems = []
   page = newPage
+  const remote = request('catalog-home').catch(()=>[])
+  const own = request('home',{page}).then(items=>({items}),error=>({items:[],error}))
+  const catalogState = request('catalog-state').catch(()=>({sources:[]}))
   await refreshLibrary()
   if (id !== viewId) return
-  const watched = history.filter(item => !item.hidden)
-  if (watched.length) main.append(group('Weiterschauen', watched.slice(0,36), item => openTitle(item, true), true))
+  const watched = history.filter(item => !item.hidden && lastEpisode(item))
+  const resume = watched.find(item => progressFor(item))
+  if (resume) main.append(feature(resume,progressFor(resume)))
+  const recent = watched.filter(item=>item!==resume)
+  if (recent.length) main.append(group(resume ? 'Zuletzt angesehen' : 'Wiedergabeverlauf', recent.slice(0,36),
+    item => openTitle(item, Boolean(progressFor(item))), true))
   const fresh = [...new Map(library.lists.flatMap(list => Object.values(list.items).filter(item => item.fresh).map(item => [item.url,item]))).values()]
   if (fresh.length) main.append(group('Neue Folgen',fresh,item => openTitle(item)))
   const catalog = make('section','','home-catalog')
   main.append(catalog)
-  const add = items => {
-    if (!items.length) {
-      catalog.replaceChildren(notice('Deine Medienbibliothek ist leer', 'Füge eine Videodatei oder einen direkten HTTPS-Videolink hinzu.'))
-      return
-    }
-    catalog.replaceChildren(group('Deine Medien',items,item=>openTitle(item)))
-  }
-  catalog.append(notice('Bibliothek wird geladen', 'Deine Medien werden geöffnet.'))
-  try {
-    const items = await request('home', { page })
-    if (id !== viewId) return
-    homeItems = items
-    add(items)
-  } catch (e) {
-    if (id === viewId) catalog.replaceChildren(notice('Katalog vorübergehend nicht erreichbar', cleanError(e), () => showHome(page, true)))
-  }
-  const sources=await request('catalog-home').catch(()=>[])
+  const [local,configured] = await Promise.all([own,catalogState])
   if (id!==viewId) return
+  if (local.error) catalog.append(notice('Mediathek vorübergehend nicht erreichbar',cleanError(local.error),()=>showHome(page)))
+  if (local.items.length) {
+    if (!resume) main.prepend(feature(local.items[0]))
+    catalog.append(group('Deine Medien',local.items,item=>openTitle(item)))
+  }
+  if (!resume && !local.items.length && !configured.sources.length && !local.error) {
+    main.prepend(emptyLibrary())
+    catalog.append(importShelf())
+  }
+  const loading = make('p','Kataloge werden geladen …','shelf-note')
+  loading.setAttribute('role','status')
+  if (configured.sources.length) catalog.append(loading)
+  const sources = await remote
+  if (id!==viewId) return
+  loading.remove()
+  const firstTitle = sources.find(source=>source.items.length)?.items[0]
+  if (!resume && !local.items.length && firstTitle) main.prepend(feature(firstTitle))
   for (const source of sources) {
     if (source.items.length) main.append(group(source.name,source.items,item=>openTitle(item)))
-    else if (source.issue) main.append(notice(source.name,source.issue,()=>showHome(page,true)))
+    else if (source.issue) main.append(notice(source.name,source.issue,()=>showHome(page)))
   }
+  catalog.hidden = !catalog.childElementCount
 }
 function cleanError(error) { return (error?.message || 'Unbekannter Fehler.').replace(/^Error invoking remote method '[^']+': Error: /, '') }
 function searchable(value) { return value.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '') }
@@ -153,7 +286,7 @@ function selectInput(label, options) {
   return select
 }
 async function showSearch(value) {
-  const id = reset()
+  const id = reset('search')
   returnTo = () => showSearch(value)
   const results = make('section')
   main.append(results)
@@ -172,7 +305,9 @@ function dialog(title, ...content) {
   syncView = undefined
   const body = document.querySelector('#settings-content')
   const row = make('div','','dialog-header')
-  row.append(make('h2',title),action('Schließen',() => settings.close()))
+  const heading = make('h2',title)
+  heading.id='settings-title'
+  row.append(heading,iconAction('close','Schließen',() => settings.close(),'icon-button',false))
   body.replaceChildren(row,...content)
   if (!settings.open) settings.showModal()
 }
@@ -197,22 +332,44 @@ function namedForm(label, buttonText, submit) {
 async function showAppSettings() {
   const report=make('p')
   report.setAttribute('role','status')
+  const tools = make('section','','settings-section')
+  tools.append(iconAction('cloud','Google-Konto',showAccount,'settings-row'),
+    iconAction('grid','Kataloge',showCatalogs,'settings-row'))
+  const updates = make('section','','settings-section')
+  const progress = make('progress','','update-progress')
+  progress.max = 100
+  progress.setAttribute('aria-label','Downloadfortschritt')
+  const controls = make('div','','actions')
+  const check = action('Jetzt prüfen',async()=>updateView?.(await request('updates-check')))
+  const install = action('Installieren und beenden',async()=>{
+    install.disabled=true
+    if (!await request('updates-install')) install.disabled=false
+  },'primary')
+  controls.append(check,install)
+  updates.append(make('h3','Software-Updates'),report,progress,controls)
   updateView = state => {
     const messages={unconfigured:'Dieser Build hat keine Update-Quelle.',idle:'Sucht beim Start automatisch nach Updates.',
-      checking:'Updates werden geprüft …',current:'KinoTix ist aktuell.',downloading:'Update wird geladen · '+(state.percent??0)+' %',
-      ready:'Update ist bereit. Es wird beim Beenden installiert.',error:'Das Update konnte gerade nicht geladen werden.'}
-    report.textContent='Version '+state.current+' · '+messages[state.phase]
+      checking:'Updates werden geprüft …',current:'KinoTix ist aktuell.',downloading:'Update '+(state.available||'')+' wird geladen · '+(state.percent??0)+' %',
+      ready:'Version '+state.available+' ist bereit und wird beim Beenden installiert.',error:'Das Update konnte gerade nicht geladen werden.'}
+    report.textContent='Version '+state.current+' · '+(messages[state.phase] || '')
+    progress.hidden = state.phase !== 'downloading'
+    progress.value = state.percent ?? 0
+    check.hidden = state.phase === 'ready' || state.phase === 'unconfigured'
+    check.disabled = state.phase === 'checking' || state.phase === 'downloading'
+    install.hidden = state.phase !== 'ready'
   }
-  dialog('Einstellungen',action('Google-Konto',showAccount),action('Kataloge',showCatalogs),make('h3','Software-Updates'),report,
-    action('Nach Updates suchen',async()=>updateView?.(await request('updates-check'))))
-  updateView(await request('updates-state'))
+  dialog('Einstellungen',tools,updates)
+  const state = await request('updates-state')
+  if (report.isConnected) updateView?.(state)
 }
 async function showCatalogs() {
   const state=await request('catalog-state')
   const view=make('div','','stack')
   for (const source of state.sources) {
-    const row=make('div','','actions')
-    row.append(make('strong',source.name),make('span',new URL(source.origin).hostname),
+    const row=make('div','','catalog-row')
+    const label=make('div')
+    label.append(make('strong',source.name),make('span',new URL(source.origin).hostname))
+    row.append(label,
       action('Entfernen',()=>{
         dialog('Katalog entfernen',make('p',source.name+' aus deiner Quellenliste entfernen?'),
           action('Entfernen',async()=>{await request('catalog-remove',{id:source.id});settings.close();await showHome()}),
@@ -291,7 +448,7 @@ async function chooseLists(title) {
   dialog('In einer Liste merken',body)
 }
 async function showLists(selected = 'default') {
-  const id = reset()
+  const id = reset('lists')
   returnTo = () => showLists(selected)
   await refreshLibrary()
   if (id !== viewId) return
@@ -351,14 +508,17 @@ async function openTitle(item, resume = false) {
     const index = Number.isInteger(previous) && previous >= 0 ?
       Math.min(previous + (record.episodes[record.last].finished ? 1 : 0), data.episodes.length-1) : 0
     const next = data.episodes[index]
-    const hero = make('section', '', 'hero')
-    const info = make('div')
-    info.append(make('h1', data.title))
-    if (data.description) info.append(make('p', data.description))
+    const hero = make('section', '', 'hero hero-detail')
+    heroArtwork(hero,data)
+    const info = make('div','','hero-content')
+    info.append(make('h1', data.title,'hero-title'))
+    const meta = [data.isSeries ? 'Serie' : 'Film',data.year && !data.title.includes(String(data.year)) ? data.year : ''].filter(Boolean).join(' · ')
+    info.append(make('p',meta,'hero-meta'))
+    if (data.description) info.append(make('p', data.description,'lead'))
     const controls = make('div', '', 'actions')
     if (next) {
-      const label = data.isSeries ? '▶ Staffel ' + next.season + ' · Folge ' + next.episode : '▶ Abspielen'
-      controls.append(action(label, () => play(next), 'primary'))
+      const label = data.isSeries ? 'Staffel ' + next.season + ' · Folge ' + next.episode : 'Abspielen'
+      controls.append(iconAction('play',label,() => play(next),'primary'))
     }
     controls.append(action('Merken',() => chooseLists(data)))
     const watchedFilm=record?.episodes[record.last]?.finished
@@ -367,8 +527,8 @@ async function openTitle(item, resume = false) {
       await openTitle(data)
     }))
     info.append(controls)
-    hero.append(art(data), info)
-    main.replaceChildren(action('← Zurück', goBack, 'detail-bar'), hero)
+    hero.append(info)
+    main.replaceChildren(iconAction('back','Zurück',goBack,'detail-bar'), hero)
     if (data.isSeries && next) main.append(episodeSection(data, record, next.season))
     if (!next) main.append(notice('Keine Quelle verfügbar', 'KinoTix hat für diesen Titel gerade keinen Player geliefert.'))
     if (resume && next) play(next)
@@ -473,16 +633,17 @@ document.querySelector('#account').addEventListener('click',() => {
 })
 document.querySelector('#collections').addEventListener('click',() => void showLists())
 document.querySelector('#home').addEventListener('click', () => showHome())
+document.querySelector('#home-tab').addEventListener('click', () => showHome())
 document.querySelector('#search').addEventListener('submit', event => {
   event.preventDefault()
   void showSearch(query.value.trim())
 })
-document.querySelector('#from-link').addEventListener('click', event => {
-  event.preventDefault()
+function openImport() {
   if (active) { void request('close'); active = null; void showHome() }
   linkDialog.showModal()
   document.querySelector('#url').focus()
-})
+}
+document.querySelector('#from-link').addEventListener('click',openImport)
 document.querySelector('#cancel-link').addEventListener('click', () => linkDialog.close())
 const addForm=document.querySelector('#link-form')
 async function addMedia(local) {

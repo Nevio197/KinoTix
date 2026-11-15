@@ -5,35 +5,68 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; script-src 'self'; style-src 'self'">
 <title>KinoTix</title>
+<link rel="icon" href="art/mark.png">
 <link rel="stylesheet" href="style.css">
 <script src="ui.js" defer></script>
 </head>
 <body>
+<svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="icon-play" viewBox="0 0 24 24"><path d="M8 4.5a1 1 0 0 1 1.5-.85l12 7.5a1 1 0 0 1 0 1.7l-12 7.5A1 1 0 0 1 8 19.5z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="icon-settings" viewBox="0 0 24 24"><path d="m10 3-.7 2.5-1.9 1.1-2.5-.7-2 3.5 1.8 1.8v2L3 15l2 3.5 2.5-.6 1.8 1.1.7 2.5h4l.7-2.5 1.9-1.1 2.5.6 2-3.5-1.8-1.8v-2L21 9.4l-2-3.5-2.5.7-1.8-1.1L14 3z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="icon-cloud" viewBox="0 0 24 24"><path d="M7 18h11a4 4 0 0 0 .3-8 6.5 6.5 0 0 0-12.5 1A3.6 3.6 0 0 0 7 18Z"/></symbol>
+  <symbol id="icon-file" viewBox="0 0 24 24"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm7 0v5h4m-8 4 5 3-5 3z"/></symbol>
+  <symbol id="icon-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 6-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0m2 2 1-1a3.5 3.5 0 1 1 5 5l-4 4a3.5 3.5 0 0 1-5 0" transform="translate(1 1)"/></symbol>
+  <symbol id="icon-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1.2"/><rect x="14" y="4" width="6" height="6" rx="1.2"/><rect x="4" y="14" width="6" height="6" rx="1.2"/><rect x="14" y="14" width="6" height="6" rx="1.2"/></symbol>
+  <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="icon-back" viewBox="0 0 24 24"><path d="M19 12H5m6-6-6 6 6 6"/></symbol>
+  <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+</svg>
 <div class="titlebar"></div>
 <header>
-  <button id="home" class="wordmark" aria-label="Startseite"><span aria-hidden="true">▶</span> KinoTix</button>
-  <form id="search" role="search">
-    <label class="sr-only" for="query">Film oder Serie</label>
-    <input type="search" id="query" placeholder="Film oder Serie suchen" autocomplete="off">
-    <button type="submit">Suchen</button>
-  </form>
-  <button id="collections">Merkliste</button>
-  <button id="profile" aria-label="Profile">Mein Profil</button>
-  <button id="account">Google-Konto</button>
-  <button id="app-settings">Einstellungen</button>
-  <button id="from-link" class="primary">Medium hinzufügen</button>
+  <div class="header-inner">
+    <button id="home" class="wordmark" aria-label="KinoTix Startseite">
+      <span class="brand-mark"><img src="art/mark.png" alt=""></span>KinoTix
+    </button>
+    <nav class="main-nav" aria-label="Hauptnavigation">
+      <button id="home-tab" data-section="home" aria-current="page">Mediathek</button>
+      <button id="collections" data-section="lists">Merkliste</button>
+    </nav>
+    <form id="search" role="search">
+      <label class="sr-only" for="query">Film oder Serie suchen</label>
+      <svg class="icon search-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+      <input type="search" id="query" placeholder="Film oder Serie suchen" autocomplete="off">
+      <button type="submit" class="sr-only">Suchen</button>
+    </form>
+    <div class="header-actions">
+      <button id="from-link" class="header-add" title="Medium hinzufügen"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>Hinzufügen</span></button>
+      <button id="account" class="icon-button" aria-label="Google-Konto" title="Google-Konto"><svg class="icon" aria-hidden="true"><use href="#icon-cloud"></use></svg></button>
+      <button id="app-settings" class="icon-button" aria-label="Einstellungen" title="Einstellungen"><svg class="icon" aria-hidden="true"><use href="#icon-settings"></use></svg></button>
+      <button id="profile" class="profile-button" aria-label="Mein Profil" title="Profile"><span class="profile-avatar" aria-hidden="true">M</span><span class="profile-name">Mein Profil</span></button>
+    </div>
+  </div>
 </header>
 <main id="main"></main>
-<dialog id="settings-dialog"><div id="settings-content"></div></dialog>
-<dialog id="link-dialog">
+<dialog id="settings-dialog" aria-labelledby="settings-title"><div id="settings-content"></div></dialog>
+<dialog id="link-dialog" aria-labelledby="import-title">
   <form id="link-form">
-    <h2>Medium hinzufügen</h2>
-    <p>Wähle eine Videodatei, importiere eine JSON-Medienliste oder gib einen direkten HTTPS-Link ein.</p>
-    <input type="text" name="title" placeholder="Titel (optional)" maxlength="150" aria-label="Titel (optional)">
-    <input type="text" name="imdb" placeholder="IMDb-ID für Zeitmarken (optional)" maxlength="14" aria-label="IMDb-ID (optional)">
-    <input type="url" name="url" id="url" placeholder="https://…/video.mp4" aria-label="HTTPS-Videolink" required>
+    <div class="dialog-header">
+      <h2 id="import-title">Medium hinzufügen</h2>
+      <button type="button" id="cancel-link" class="icon-button" aria-label="Schließen"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button>
+    </div>
+    <div class="import-options">
+      <button type="button" id="file-open"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>Datei oder Liste wählen</button>
+      <button type="button" id="catalog-open"><svg class="icon" aria-hidden="true"><use href="#icon-grid"></use></svg>Katalog hinzufügen</button>
+    </div>
+    <label class="field-label" for="url">Direkter HTTPS-Videolink</label>
+    <input type="url" name="url" id="url" placeholder="https://…/video.mp4" required>
+    <div class="import-fields">
+      <label class="field-label">Titel <span>optional</span><input type="text" name="title" maxlength="150"></label>
+      <label class="field-label">IMDb-ID <span>für Zeitmarken</span><input type="text" name="imdb" placeholder="tt1234567" maxlength="14"></label>
+    </div>
     <p class="inline-error" role="status"></p>
-    <div class="actions"><button type="button" id="cancel-link">Abbrechen</button><button type="button" id="catalog-open">Katalog hinzufügen</button><button type="button" id="file-open">Datei oder Liste wählen</button><button type="submit" class="primary">Link hinzufügen</button></div>
+    <div class="actions"><button type="submit" class="primary">Link hinzufügen</button></div>
   </form>
 </dialog>
 </body>

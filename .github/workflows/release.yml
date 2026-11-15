@@ -86,9 +86,15 @@ jobs:
         run: |
           node -e 'if (process.env.GITHUB_REF_NAME !== "v" + require("./app/package.json").version) process.exit(1)'
           node -e 'const config={url:process.env.SUPABASE_URL,publishableKey:process.env.SUPABASE_PUBLISHABLE_KEY}; if(!require("./app/account-sync.cjs").validConfig(config)) throw Error("Expected a Supabase URL and Publishable Key"); require("node:fs").writeFileSync("app/supabase.json",JSON.stringify(config))'
-      - name: Build signed installer and update files
+      - name: Add the Windows update trust key
+        if: runner.os == 'Windows'
+        shell: bash
         env:
-          KINOTIX_PUBLIC_REPOSITORY: ${{ github.repository }}
+          WINDOWS_UPDATE_PUBLIC_KEY: ${{ vars.KINOTIX_WINDOWS_UPDATE_PUBLIC_KEY }}
+        run: |
+          node -e 'const fs=require("node:fs"); const config={repository:process.env.GITHUB_REPOSITORY,publicKey:process.env.WINDOWS_UPDATE_PUBLIC_KEY}; require("./app/windows-update-format.cjs").updateConfig(config); fs.writeFileSync("app/windows-update.json",JSON.stringify(config))'
+      - name: Build installers
+        env:
           KINOTIX_WINDOWS_PUBLISHER: ${{ vars.KINOTIX_WINDOWS_PUBLISHER }}
           WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           WINDOWS_CSC_PASSWORD: ${{ secrets.WINDOWS_CSC_PASSWORD }}
@@ -101,16 +107,22 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == Windows ]]; then
-            export CSC_LINK="${WINDOWS_CSC_LINK:?Missing Windows signing identity}"
-            export CSC_KEY_PASSWORD="$WINDOWS_CSC_PASSWORD"
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            if [[ -n "$WINDOWS_CSC_LINK" ]]; then
+              : "${KINOTIX_WINDOWS_PUBLISHER:?Missing Windows certificate publisher}"
+              export CSC_LINK="$WINDOWS_CSC_LINK"
+              export CSC_KEY_PASSWORD="$WINDOWS_CSC_PASSWORD"
+              echo 'WINDOWS_AUTHENTICODE=true' >> "$GITHUB_ENV"
+            fi
           else
+            export KINOTIX_PUBLIC_REPOSITORY="$GITHUB_REPOSITORY"
             export CSC_LINK="${MAC_CSC_LINK:?Missing Mac signing identity}"
             export CSC_KEY_PASSWORD="$MAC_CSC_PASSWORD"
             : "${APPLE_ID:?Missing Apple ID}" "${APPLE_APP_SPECIFIC_PASSWORD:?Missing notarization credential}" "${APPLE_TEAM_ID:?Missing Apple Team ID}"
           fi
           npm run ${{ matrix.script }} --prefix windows
       - name: Verify signed Windows build
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.WINDOWS_AUTHENTICODE == 'true'
         shell: pwsh
         env:
           KINOTIX_WINDOWS_PUBLISHER: ${{ vars.KINOTIX_WINDOWS_PUBLISHER }}
@@ -127,12 +139,29 @@ jobs:
               throw "The signing certificate does not match KINOTIX_WINDOWS_PUBLISHER for $path."
             }
           }
+      - name: Sign the Windows update manifest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_UPDATE_PRIVATE_KEY: ${{ secrets.KINOTIX_WINDOWS_UPDATE_PRIVATE_KEY }}
+        run: |
+          if (!$env:WINDOWS_UPDATE_PRIVATE_KEY) { throw 'Missing KinoTix release key' }
+          $keyFile = New-TemporaryFile
+          try {
+            [IO.File]::WriteAllBytes($keyFile.FullName, [Convert]::FromBase64String($env:WINDOWS_UPDATE_PRIVATE_KEY))
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+            node scripts/sign-windows-release.cjs "dist/KinoTix-$version-Windows-x64-Setup.exe" $keyFile.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to sign update manifest' }
+          } finally {
+            Remove-Item -LiteralPath $keyFile.FullName -Force
+          }
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.script }}
           if-no-files-found: error
           path: |
             dist/KinoTix-*
+            dist/kinotix-windows-x64.json*
             dist/latest*.yml
 
   release:
@@ -156,8 +185,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           files=(
             "dist/KinoTix-$version-Windows-x64-Setup.exe"
-            "dist/KinoTix-$version-Windows-x64-Setup.exe.blockmap"
-            dist/latest.yml
+            dist/kinotix-windows-x64.json
+            dist/kinotix-windows-x64.json.sig
           )
           if [[ "$MAC_RELEASE_ENABLED" == "true" ]]; then
             files+=(

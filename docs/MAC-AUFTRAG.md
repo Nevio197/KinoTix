@@ -1,6 +1,6 @@
 # Aufgabe für das MacBook
 
-Teste **KinoTix 0.3.1** aus diesem Quellcode auf macOS. Die App ist ein eigener Ableger. Verwende dieses Repo und bei Release-Tests dessen eigene App-ID `de.kinotix.desktop` und eigene Plattform-Zugangsdaten.
+Teste **KinoTix 0.4.0** aus diesem Quellcode auf macOS. Verwende für Release-Tests die App-ID `de.kinotix.desktop` und die eigenen Zugangsdaten für Signierung und Notarisierung.
 
 ## 1. Eigenen Player prüfen
 
@@ -17,6 +17,8 @@ Teste **KinoTix 0.3.1** aus diesem Quellcode auf macOS. Die App ist ein eigener 
 4. Die [Beispielliste](../examples/medienliste.json) mit eigenen Testvideos in den dort genannten Dateien nachstellen und importieren. In derselben Folge Quelle und Qualität wechseln. Zeitposition, Pause und Lautstärke sollen erhalten bleiben. Zur nächsten Folge wechseln und den automatischen Countdown einmal abbrechen.
 5. Bild-in-Bild öffnen und schließen. Den Schlaftimer auf **Nach diesem Video** setzen und prüfen, dass am Ende keine weitere Folge startet.
 6. Mit zu den Testvideos passenden Marken prüfen, dass Intro und Abspann springen, Rückgängigmachen wirkt und eine Abspannszene abgespielt wird. Prüfe auch ein Video ohne Marken. [Zeitmarken und Importformat](ZEITMARKEN.md)
+7. In der Mediathek nach angefangener Wiedergabe die große Karte unter **Weiterschauen** prüfen. Sie zeigt Restlaufzeit und Fortschritt. Startseite, Titelansicht und Dialoge an einem kleinen Fenster sowie im Vollbild prüfen.
+8. Beim Darüberfahren über die Zeitleiste die Bildvorschau prüfen. Mit zwei AAC-Tonspuren die Sprache wechseln. Eine absichtlich unbrauchbare erste Quelle mit einer intakten zweiten Quelle testen. Folge, Position, Pause, Qualität und bevorzugte Tonspur sollen beim Wechsel erhalten bleiben.
 
 ## 2. Google-Konto und Gastmodus prüfen
 
@@ -28,6 +30,6 @@ Teste **KinoTix 0.3.1** aus diesem Quellcode auf macOS. Die App ist ein eigener 
 ## 3. Signierung und Updates prüfen
 
 - Der Mac-Build ist für Apple Silicon und Intel als Universal-App konfiguriert. Den nativen Test und die Hardware dokumentieren.
-- Sobald Developer-ID-Signatur und Notarisierungszugang verfügbar sind, DMG und ZIP signiert bauen. Windows-Herausgeber und Signatur, Google-Client sowie das eigene öffentliche Test-Repository gemäß README vorbereiten.
-- Zwei signierte Testversionen erstellen und den echten Updatepfad prüfen. Ältere App öffnen, im Hintergrund laden lassen, regulär beenden und wieder öffnen. Versionsnummer und vorhandene lokale Daten prüfen. Die Installer sowie `latest.yml` und `latest-mac.yml` gehören zum jeweiligen Release.
-- Ergebnis und offene Punkte im Repo festhalten. Die Windows-Funktionsprüfung lief mit Testvideos. Der Google-Login und die erste Synchronisierung liefen auf Windows gegen Supabase live. Der native Mac-Test, der Abgleich zwischen beiden Geräten und der signierte Update-Test sind offene Aufgaben.
+- Sobald Developer-ID-Signatur und Notarisierungszugang verfügbar sind, DMG und ZIP signiert bauen. Richte die Mac-Freigabe im öffentlichen KinoTix-Repo gemäß README ein.
+- Zwei Testversionen mit verifizierbaren Updates erstellen. Ältere App öffnen, im Hintergrund laden lassen, regulär beenden und wieder öffnen. Versionsnummer und vorhandene lokale Daten prüfen. Zum Release gehören die Installer, das signierte Windows-Manifest `kinotix-windows-x64.json` samt `.sig` und für macOS `latest-mac.yml`.
+- Ergebnis und offene Punkte im Repo festhalten. Die Windows-Funktionsprüfung lief mit Testvideos. Der Google-Login und die erste Synchronisierung liefen auf Windows gegen Supabase live. Der native Mac-Test, der Abgleich zwischen beiden Geräten und der Mac-Update-Test sind offene Aufgaben.

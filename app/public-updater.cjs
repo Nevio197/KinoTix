@@ -1,9 +1,22 @@
 const fs = require('node:fs')
 const path = require('node:path')
+const { createWindowsUpdater } = require('./windows-updater.cjs')
+const { updateConfig } = require('./windows-update-format.cjs')
 
 function createUpdater({app,notify}) {
+  const windowsConfig = path.join(__dirname,'windows-update.json')
+  let customConfigured = false
+  if (process.platform === 'win32' && process.arch === 'x64' && app.isPackaged && fs.existsSync(windowsConfig)) {
+    customConfigured = true
+    try {
+      const config = updateConfig(JSON.parse(fs.readFileSync(windowsConfig,'utf8')))
+      return createWindowsUpdater({app,notify,config})
+    } catch (error) {
+      console.warn('KinoTix-Update:', error.message)
+    }
+  }
   const current = app.getVersion()
-  const enabled = app.isPackaged && fs.existsSync(path.join(process.resourcesPath,'app-update.yml'))
+  const enabled = !customConfigured && app.isPackaged && fs.existsSync(path.join(process.resourcesPath,'app-update.yml'))
   let state = {current,phase:enabled?'idle':'unconfigured'}
   const publish = (phase, extra = {}) => notify({type:'updater',...(state={current,phase,...extra})})
   let autoUpdater

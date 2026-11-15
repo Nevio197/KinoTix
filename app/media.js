@@ -1,5 +1,5 @@
 const {request,status} = window.kino
-const video = document.querySelector('video')
+const video = document.querySelector('#video')
 const byID = id => document.getElementById(id)
 const controls = byID('controls')
 const seek = byID('seek')
@@ -7,8 +7,18 @@ const volume = byID('volume')
 const source = byID('source')
 const quality = byID('quality')
 const sleep = byID('sleep')
+const timeline = byID('timeline')
+const preview = byID('seek-preview')
+const previewFrame = byID('preview-frame')
+const audioTrack = byID('audio-track')
+const audioTracks = video.audioTracks
+const languageLabels = new Intl.DisplayNames(['de'],{type:'language'})
+const labels={intro:'Intro',recap:'Rückblick',outro:'Abspann',post_credits:'Abspannszene'}
 let state = {}
-let panel, hideTimer, messageTimer, optionsKey
+let panel, hideTimer, messageTimer, optionsKey, segmentsKey
+let audioTracksKey, audioChoiceMade=false
+let marks=[], previewMedia, previewTimer, previewTarget, pointerTime
+let previewUnavailable=false
 
 const icons = {
   back:'<path d="m14 6-6 6 6 6"/>',
@@ -17,7 +27,7 @@ const icons = {
   volume:'<path d="M3 9h4l5-4v14l-5-4H3zM15 9a4 4 0 0 1 0 6m2-9a8 8 0 0 1 0 12"/>',
   muted:'<path d="M3 9h4l5-4v14l-5-4H3zM16 10l5 5m0-5-5 5"/>',
   next:'<path d="m5 5 11 7-11 7m14-14v14"/>',
-  options:'<path d="M3 7h18M3 17h18"/><circle cx="8" cy="7" r="2.5" fill="#211925"/><circle cx="16" cy="17" r="2.5" fill="#211925"/>',
+  options:'<path d="M3 7h4m5 0h9M3 17h9m5 0h4"/><circle cx="9.5" cy="7" r="2.5"/><circle cx="14.5" cy="17" r="2.5"/>',
   pip:'<rect x="2.5" y="4" width="19" height="15" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor" stroke="none"/>',
   timer:'<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/>',
   fullscreen:'<path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5"/>',
@@ -38,17 +48,17 @@ for (const id of ['back','play','next','options','pip','timer','fullscreen']) ic
 icon('mute','volume')
 
 function report(text) {
-  const error=byID('error')
+  const message=byID('notice')
   clearTimeout(messageTimer)
-  error.textContent=text
-  error.hidden=!text
-  if (text) messageTimer=setTimeout(()=>{error.hidden=true},6500)
+  message.textContent=text
+  message.hidden=!text
+  if (text) messageTimer=setTimeout(()=>{message.hidden=true},5200)
 }
 const send = (action,value) => request('player-control',{action,value}).catch(error=>report(error.message))
 function wake() {
   clearTimeout(hideTimer)
   controls.classList.remove('asleep')
-  if (video.paused || panel || state.countdown || controls.querySelector(':focus-visible')) return
+  if (video.paused || panel || state.error || state.countdown || timeline.matches(':hover') || controls.querySelector(':focus-visible')) return
   hideTimer=setTimeout(()=>controls.classList.add('asleep'),2700)
 }
 function format(value) {
@@ -56,14 +66,42 @@ function format(value) {
   const minutes=Math.floor(seconds/60)
   return (minutes>=60?Math.floor(minutes/60)+':'+String(minutes%60).padStart(2,'0'):minutes)+':'+String(seconds%60).padStart(2,'0')
 }
+function renderSegments(duration) {
+  const input=state.segments ?? []
+  const key=JSON.stringify([duration,input])
+  if (key===segmentsKey) return
+  segmentsKey=key
+  marks=duration ? input.filter(mark=>Object.hasOwn(labels,mark.type) &&
+    Number.isFinite(mark.start) && Number.isFinite(mark.end) && mark.start>=0 &&
+    mark.start<duration && mark.end>mark.start && mark.end<=duration+2)
+    .map(mark=>({...mark,end:Math.min(mark.end,duration)})) : []
+  byID('segments').replaceChildren(...marks.map(mark=>{
+    const element=document.createElement('div')
+    element.className='segment'
+    element.dataset.kind=mark.type
+    element.style.left=mark.start/duration*100+'%'
+    element.style.width=(mark.end-mark.start)/duration*100+'%'
+    return element
+  }))
+  byID('segment-description').textContent=marks.map(mark=>
+    labels[mark.type]+' von '+format(mark.start)+' bis '+format(mark.end)).join('. ')
+}
+function updatePosition(position) {
+  const duration=Number(seek.max)
+  const value=Math.min(position,duration)
+  byID('played').style.width=value/duration*100+'%'
+  seek.setAttribute('aria-valuetext',format(value)+' von '+format(duration))
+}
 function updateTime() {
   const ready=state.ready && Number.isFinite(video.duration) && video.duration>0
   seek.disabled=!ready
   if (!seek.matches(':active')) {
     seek.max=ready?video.duration:1
     seek.value=video.currentTime
+    updatePosition(Number(seek.value))
   }
   byID('time').textContent=format(video.currentTime)+(ready?' / '+format(video.duration):'')
+  renderSegments(ready?video.duration:0)
 }
 function updatePlayback() {
   icon('play',video.paused?'play':'pause',video.paused?'Abspielen':'Pause')
@@ -89,15 +127,123 @@ function updateOptions() {
   fill(quality,row.heights.map((height,index)=>({value:index,label:height?height+'p':
     video.videoHeight?'Original · '+video.videoHeight+'p':'Original'})),state.quality)
 }
+function normalizedLanguage(value) {
+  if (!value || value==='und') return ''
+  try { return new Intl.Locale(value).language } catch { return '' }
+}
+function chooseAudio(index, tracks) {
+  const chosen=tracks[index]
+  if (!chosen) return false
+  chosen.enabled=true
+  for (const track of tracks) if (track!==chosen && track.enabled) track.enabled=false
+  return chosen.enabled
+}
+function updateAudioTracks() {
+  const tracks=Array.from(audioTracks ?? [])
+  byID('audio-field').hidden=tracks.length<2
+  if (tracks.length<2) return
+  const selected=tracks.findIndex(track=>track.enabled)
+  const prefer=normalizedLanguage(state.audioLanguage)
+  if (!audioChoiceMade && prefer && normalizedLanguage(tracks[selected]?.language)!==prefer) {
+    const index=tracks.findIndex(track=>normalizedLanguage(track.language)===prefer)
+    if (index>=0) { audioChoiceMade=true; chooseAudio(index,tracks) }
+  }
+  const current=tracks.findIndex(track=>track.enabled)
+  const entries=tracks.map((track,index)=>{
+    const code=normalizedLanguage(track.language)
+    const label=code?languageLabels.of(code):''
+    const names=[...new Set([label,track.label].filter(Boolean))]
+    return {value:index,label:names.join(' · ') || 'Tonspur '+(index+1)}
+  })
+  const labelCounts=new Map()
+  for (const entry of entries) labelCounts.set(entry.label,(labelCounts.get(entry.label) ?? 0)+1)
+  for (const entry of entries) if (labelCounts.get(entry.label)>1) entry.label+=' · '+(entry.value+1)
+  const key=JSON.stringify(entries)
+  if (key!==audioTracksKey) {
+    audioTracksKey=key
+    fill(audioTrack,entries,current)
+  } else audioTrack.value=current
+}
+
+function drawPreview() {
+  const source=previewMedia
+  if (preview.hidden || pointerTime===undefined || !source || source.seeking ||
+      source.readyState<2 || !source.videoWidth || Math.abs(source.currentTime-previewTarget)>.42 ||
+      Math.abs(pointerTime-previewTarget)>1) return
+  const context=previewFrame.getContext('2d')
+  if (!context) return
+  const width=previewFrame.width, height=previewFrame.height
+  const scale=Math.min(width/source.videoWidth,height/source.videoHeight)
+  const w=source.videoWidth*scale, h=source.videoHeight*scale
+  context.fillStyle='#05070c'
+  context.fillRect(0,0,width,height)
+  try { context.drawImage(source,(width-w)/2,(height-h)/2,w,h) } catch { return }
+  previewFrame.hidden=false
+  positionPreview(pointerTime)
+}
+function loadPreview() {
+  if (previewUnavailable || pointerTime===undefined || !video.currentSrc) return
+  if (!previewMedia) {
+    // Leave the preview decoder outside the player document and start only on a deliberate hover.
+    previewMedia=document.createElement('video')
+    previewMedia.muted=true
+    previewMedia.preload='metadata'
+    previewMedia.addEventListener('loadedmetadata',loadPreview)
+    previewMedia.addEventListener('loadeddata',drawPreview)
+    previewMedia.addEventListener('seeked',drawPreview)
+    previewMedia.addEventListener('error',()=>{
+      previewUnavailable=true
+      previewFrame.hidden=true
+      positionPreview(pointerTime)
+    },{once:true})
+    previewMedia.src=video.currentSrc
+  }
+  if (previewMedia.readyState===0) return
+  previewTarget=Math.max(0,Math.min(pointerTime,previewMedia.duration-.05))
+  if (!Number.isFinite(previewTarget)) return
+  if (Math.abs(previewMedia.currentTime-previewTarget)>.15) previewMedia.currentTime=previewTarget
+  else drawPreview()
+}
+function positionPreview(time) {
+  if (!Number.isFinite(time) || preview.hidden) return
+  const width=timeline.clientWidth
+  const offset=preview.offsetWidth/2
+  const point=6+time/Number(seek.max)*(width-12)
+  preview.style.left=Math.min(width-offset,Math.max(offset,point))+'px'
+}
+function showPreview(event) {
+  if (event.pointerType==='touch' || seek.disabled || panel) return
+  const {left,width}=seek.getBoundingClientRect()
+  const share=Math.min(1,Math.max(0,(event.clientX-left-6)/Math.max(1,width-12)))
+  const time=share*Number(seek.max)
+  if (pointerTime!==undefined && Math.abs(time-pointerTime)<.15) return
+  pointerTime=time
+  byID('preview-time').textContent=format(time)
+  const mark=marks.find(mark=>time>=mark.start && time<mark.end)
+  const caption=byID('preview-segment')
+  caption.hidden=!mark
+  caption.textContent=mark?labels[mark.type]:''
+  if (Math.abs(time-previewTarget)>1) previewFrame.hidden=true
+  preview.hidden=false
+  positionPreview(time)
+  clearTimeout(previewTimer)
+  previewTimer=setTimeout(loadPreview,155)
+}
+function hidePreview() {
+  pointerTime=undefined
+  preview.hidden=true
+  previewFrame.hidden=true
+  clearTimeout(previewTimer)
+}
 function togglePanel(name) {
   panel=panel===name?null:name
+  hidePreview()
   for (const id of ['options','timer']) {
     byID(id+'-panel').hidden=panel!==id
     byID(id).setAttribute('aria-expanded',String(panel===id))
   }
   wake()
 }
-const labels={intro:'Intro',recap:'Rückblick',outro:'Abspann'}
 function render(next) {
   const previous=state
   state=next
@@ -107,13 +253,19 @@ function render(next) {
   byID('remaining').textContent=state.countdown?'Nächste Folge in '+state.countdown+' s':''
   icon('fullscreen',state.fullscreen?'exit':'fullscreen',state.fullscreen?'Vollbild beenden':'Vollbild')
   byID('marker').hidden=!state.marker
+  byID('skip').hidden=!(state.marker || state.undo)
   if (state.marker) {
     byID('marker').textContent=labels[state.marker.type]+' überspringen'
     byID('marker').title='Zeitmarke: '+state.marker.provider
   }
   byID('undo').hidden=!state.undo
   if (state.undo) byID('undo').textContent=labels[state.undo.type]+' übersprungen · Rückgängig'
-  if (state.error && state.error!==previous.error) report(state.error)
+  const error=byID('error')
+  if (state.error!==previous.error) {
+    error.textContent=state.error || ''
+    error.hidden=!state.error
+  }
+  if (state.notice && state.notice!==previous.notice) report(state.notice)
   if (state.audio) {
     const {muted,level}=state.audio
     if (!volume.matches(':active')) volume.value=muted?0:Math.round(level*100)
@@ -123,9 +275,10 @@ function render(next) {
   sleep.value=state.sleep==null?'':String(state.sleep)
   byID('timer').dataset.on=String(state.sleep!=null)
   updateOptions()
+  updateAudioTracks()
   updateTime()
   if (state.fullscreen!==previous.fullscreen || state.countdown!==previous.countdown ||
-      state.undo!==previous.undo || state.marker!==previous.marker) wake()
+      state.undo!==previous.undo || state.marker!==previous.marker || state.error!==previous.error) wake()
 }
 status(render)
 void send('state').then(next=>{if(next && !state.title) render(next)})
@@ -138,10 +291,20 @@ byID('timer').addEventListener('click',()=>togglePanel('timer'))
 byID('options').addEventListener('click',()=>togglePanel('options'))
 source.addEventListener('change',()=>void send('source',Number(source.value)))
 quality.addEventListener('change',()=>void send('quality',Number(quality.value)))
+audioTrack.addEventListener('change',()=>{
+  const tracks=Array.from(audioTracks ?? [])
+  const index=Number(audioTrack.value)
+  audioChoiceMade=true
+  if (!chooseAudio(index,tracks)) { report('Die Tonspur konnte nicht gewechselt werden.'); updateAudioTracks(); return }
+  void send('audio-language',normalizedLanguage(tracks[index].language))
+})
+for (const event of ['addtrack','removetrack','change']) audioTracks?.addEventListener(event,updateAudioTracks)
 sleep.addEventListener('change',()=>{void send('sleep',sleep.value==='episode'?'episode':Number(sleep.value)||null);togglePanel('timer')})
 volume.addEventListener('input',()=>void send('set-volume',Number(volume.value)/100))
-seek.addEventListener('input',()=>seek.setAttribute('aria-valuetext',format(Number(seek.value))))
+seek.addEventListener('input',()=>updatePosition(Number(seek.value)))
 seek.addEventListener('change',()=>void send('seek',Number(seek.value)))
+timeline.addEventListener('pointermove',showPreview)
+timeline.addEventListener('pointerleave',()=>{hidePreview(); wake()})
 byID('pip').addEventListener('click',async()=>{
   try {
     if (document.pictureInPictureElement) await document.exitPictureInPicture()
@@ -152,6 +315,7 @@ video.addEventListener('enterpictureinpicture',()=>{byID('pip').dataset.on='true
 video.addEventListener('leavepictureinpicture',()=>{byID('pip').dataset.on='false'})
 for (const event of ['timeupdate','durationchange','loadedmetadata','seeked']) video.addEventListener(event,updateTime)
 video.addEventListener('loadedmetadata',updateOptions)
+video.addEventListener('loadedmetadata',updateAudioTracks)
 for (const event of ['playing','pause','ended']) video.addEventListener(event,updatePlayback)
 video.addEventListener('click',()=>{
   if (panel) togglePanel(panel)

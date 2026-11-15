@@ -15,6 +15,12 @@ function openLibrary(folder) {
     muted: state.audio?.muted === true,
   })
   const setAudio = value => { state.audio = value }
+  const audioLanguage = () => typeof state.audioLanguage === 'string' ? state.audioLanguage : ''
+  const setAudioLanguage = value => {
+    if (value === audioLanguage()) return
+    state.audioLanguage = value
+    save()
+  }
   const profile = () => state.profiles.find(p => p.id === state.active) ?? state.profiles[0]
   function save() {
     fs.writeFileSync(file + '.tmp', JSON.stringify(state), { mode: 0o600 })
@@ -103,7 +109,7 @@ function openLibrary(folder) {
     save()
     return snapshot()
   }
-  return { profile, primaryProfile: () => state.profiles[0], save, audio, setAudio, snapshot, addProfile, select, addList, toggle,
+  return { profile, primaryProfile: () => state.profiles[0], save, audio, setAudio, audioLanguage, setAudioLanguage, snapshot, addProfile, select, addList, toggle,
     record, newEpisodes, viewed, find: id => state.profiles.find(p => p.id === id) }
 }
 module.exports = { openLibrary }

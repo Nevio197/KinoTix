@@ -12,6 +12,8 @@
 
   function readSegments(response, local = {}) {
     const markers = []
+    const post = local.post_credits ?? response?.post_credits
+    const scene = interval(post)
     for (const type of ['intro','recap','outro']) {
       const raw = local[type] ?? response?.[type]
       const provider = local[type] ? 'Medienliste' : 'IntroDB'
@@ -22,9 +24,7 @@
         continue
       }
       // Preserve a known post-credits scene even when its confidence is low.
-      const post = local.post_credits ?? response?.post_credits
       if (post != null) {
-        const scene = interval(post)
         if (!scene) continue
         const before = Math.min(mark.end, scene.start)
         const after = Math.max(mark.start, scene.end)
@@ -32,14 +32,25 @@
         if (mark.end > after) markers.push({type,provider,start:after,end:mark.end})
       } else markers.push({type,provider,...mark})
     }
+    if (scene) markers.push({type:'post_credits',provider:local.post_credits?'Medienliste':'IntroDB',...scene})
     return markers
   }
 
   function destination(mark, time, duration) {
-    if (!Number.isFinite(time) || !Number.isFinite(duration) || time < mark.start || (mark.creditsEnd ?? mark.end) > duration + 2) return null
+    if (mark.type === 'post_credits' || !Number.isFinite(time) || !Number.isFinite(duration) ||
+        time < mark.start || (mark.creditsEnd ?? mark.end) > duration + 2) return null
     if (mark.type === 'outro' && mark.start < duration / 2) return null
     const target = Math.min(mark.end, duration - .1)
     return target - time > .5 ? target : null
+  }
+
+  function timelineSegments(markers, duration) {
+    if (!Number.isFinite(duration) || duration <= 0) return []
+    return markers.filter(mark => mark.type === 'post_credits' ?
+      mark.start >= duration / 2 && mark.start < duration && mark.end <= duration + 2 :
+      destination(mark,mark.start,duration) !== null)
+      .map(({type,start,end}) => ({type,start,end:Math.min(end,duration)}))
+      .sort((first, second) => first.start-second.start)
   }
 
   function autoSkip(markers, skipped, time, duration) {
@@ -90,7 +101,7 @@
     }
   }
 
-  const api = { autoSkip, destination, markerService, readSegments, segmentKey }
+  const api = { autoSkip, destination, markerService, readSegments, segmentKey, timelineSegments }
   if (typeof module === 'object' && module.exports) module.exports = api
   else window.KinoSegments = api
 })()

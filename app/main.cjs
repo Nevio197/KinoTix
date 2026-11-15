@@ -8,18 +8,16 @@ const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
 const { createUpdater } = require('./public-updater.cjs')
-const { autoSkip, destination, markerService, segmentKey } = require('./segments.js')
-const { controller, keyAction } = require('./playback-controls.cjs')
+const { autoSkip, destination, markerService, readSegments, segmentKey, timelineSegments } = require('./segments.js')
+const { controller, keyAction, fallbackVariant } = require('./playback-controls.cjs')
 const { createFullscreen } = require('./fullscreen.cjs')
 const getMarkers = markerService(async url => {
   const response = await net.fetch(url, {signal:AbortSignal.timeout(4500)})
   return response.ok ? response.json() : null
 })
 
-const playerScript = `(() => {
-  const videos = [...document.querySelectorAll('video')].filter(video => Number.isFinite(video.duration) && video.duration > 0)
-  return videos.sort((first,second) => second.duration-first.duration)[0]
-})()`
+const playerScript = "document.getElementById('video')"
+const mediaTimeout = 12000
 const webOptions = { sandbox: true, contextIsolation: true, nodeIntegration: false }
 const control = controller(playerScript)
 let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, folder
@@ -75,7 +73,8 @@ function stop(leaveFullscreen = true) {
 }
 const readVideo = `(() => {
   const video = ${playerScript}
-  return video ? {time:video.currentTime, duration:video.duration, ended:video.ended, paused:video.paused, seeking:video.seeking, error:video.error?.code ?? null,
+  return video ? {time:video.currentTime, duration:video.duration, ended:video.ended, paused:video.paused, seeking:video.seeking,
+    readyState:video.readyState, error:video.error?.code ?? null,
     level:video.volume, volumeReady:video[Symbol.for("kinotix-volume-ready")] === true,
   } : null;
 })()`
@@ -133,7 +132,9 @@ async function checkpoint(info = playback) {
   if (!info?.frame || !info.resumed) return
   const frame = info.frame
   const value = await frame.executeJavaScript(readVideo).catch(() => null)
-  if (playback !== info || !value || value.error || value.time < 0 || !Number.isFinite(value.time)) return
+  if (playback !== info || !value || value.error || !Number.isFinite(value.duration) ||
+      value.time < 0 || !Number.isFinite(value.time)) return
+  info.lastObserved = value
   if (value.time !== info.lastSaved || value.paused !== info.paused || value.ended !== info.ended) {
     info.lastSaved = value.time
     info.paused = value.paused
@@ -179,7 +180,7 @@ function setSleep(input) {
     sleepJob = setTimeout(() => {
       sleepMinutes = null
       void videoCommand('pause')
-      fullscreen.update({sleep:null,error:'Schlaftimer · Wiedergabe angehalten'})
+      fullscreen.update({sleep:null,notice:'Schlaftimer · Wiedergabe angehalten'})
     }, input * 60000)
   }
   return true
@@ -209,11 +210,33 @@ async function switchVariant(info, action, value) {
   const source = action==='source' ? value : info.selection.source
   const quality = action==='quality' ? value : 0
   if (!info.episode.sources[source]?.variants[quality] ||
-      (info.selection.source===source && info.selection.quality===quality)) return false
+      (!info.failed && info.selection.source===source && info.selection.quality===quality)) return false
   const current=await checkpoint(info)
-  if (playback!==info) return false
-  return startPlayer({...info.request,source,quality,position:current?.time,autoplay:current ? !current.paused : true,
-    skipped:info.skipped})
+  if (playback!==info || info.requestID!==playbackRequest) return false
+  return mountVariant(info.title,info.episode,info.profile,{source,quality},{
+    ...resumeDetails(info,current),attempted:new Set(),notice:null,
+  },info.requestID)
+}
+function resumeDetails(info, current=info.lastObserved) {
+  return {...info.request,position:current?.time ?? info.resumePosition,
+    autoplay:current ? !current.paused : info.request.autoplay,skipped:info.skipped}
+}
+function recoverVariant(info) {
+  if (playback!==info || info.requestID!==playbackRequest || info.failed) return false
+  const {sources}=info.episode
+  const attempted=info.attempted
+  attempted.add(sources[info.selection.source].variants[info.selection.quality].url)
+  const selection=fallbackVariant(sources,info.selection,attempted)
+  if (selection) {
+    const notice=selection.source===info.selection.source?'Andere Qualität wird geladen':
+      'Andere Quelle wird geladen · '+sources[selection.source].name
+    return mountVariant(info.title,info.episode,info.profile,selection,
+      {...resumeDetails(info),attempted,notice},info.requestID)
+  }
+  clearInterval(timer)
+  info.failed=true
+  fullscreen.update({ready:false,notice:null,error:'Dieses Video konnte nicht abgespielt werden. Prüfe die Datei oder den Link und öffne es erneut.'})
+  return false
 }
 async function poll(info, view, token) {
   if (info.polling || view.isDestroyed() || token !== playToken) return
@@ -223,14 +246,23 @@ async function poll(info, view, token) {
     const frame=view.mainFrame
     const value=await frame.executeJavaScript(readVideo).catch(()=>null)
     if (token !== playToken) return
-    if (!value || value.error) {
-      if (Date.now()-info.startedAt > 12000 || value?.error) {
-        clearInterval(timer)
-        fullscreen.update({error:'Das Video konnte nicht abgespielt werden. Prüfe die Datei oder wähle eine andere Quelle.'})
-      }
+    if (value?.error) return recoverVariant(info)
+    const now=Date.now()
+    if (!value || !Number.isFinite(value.duration) || value.duration<=0) {
+      if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
       return
     }
+    const stalled=value.seeking || (!value.ended && !value.paused &&
+      (value.readyState<2 || Math.abs(value.time-(info.lastObserved?.time ?? -1))<.05))
+    if (stalled) {
+      if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
+    } else info.stalledAt=undefined
+    if (info.resumed) info.lastObserved=value
     info.frame = frame
+    if (info.duration!==value.duration) {
+      info.duration=value.duration
+      fullscreen.update({segments:timelineSegments(info.markers,info.duration)})
+    }
     if (!value.volumeReady) {
       if (!await control(frame,'set-volume',audio.level) || token !== playToken) return
       info.audioReady = true
@@ -240,14 +272,13 @@ async function poll(info, view, token) {
       updateOutputMute(info)
     }
     if (!info.resumed) {
-      const id = info.episode.season + ':' + info.episode.episode
-      const prev = info.profile.history[info.title.url]?.episodes[id]
-      const resume = Math.min(info.request.position ?? (prev && !prev.finished ? prev.time : 0),value.duration-.1)
+      const resume = Math.min(info.resumePosition,Math.max(0,value.duration-.1))
       if (resume>0) await control(frame,'seek',resume)
       if (token!==playToken) return
       info.resumed = true
+      info.lastObserved={...value,time:resume,paused:info.request.autoplay===false}
       fullscreen.update({ready:true})
-      if (info.request.autoplay!==false) await control(frame,'play')
+      if (info.request.autoplay!==false) void control(frame,'play')
       return
     }
     const justUndidSkip = Date.now() < (info.skipPausedUntil ?? 0)
@@ -277,7 +308,7 @@ async function poll(info, view, token) {
       if (sleeping) {
         setSleep(null)
         await control(frame,'pause')
-        fullscreen.update({error:'Schlaftimer · Wiedergabe angehalten'})
+        fullscreen.update({notice:'Schlaftimer · Wiedergabe angehalten'})
       }
       else countdown(info)
     }
@@ -289,30 +320,42 @@ async function startPlayer(details) {
     {title:media.detail(details.url),episode:media.episode(details.url,details.season,details.episode)}
   if (request!==playbackRequest || !win || win.isDestroyed()) return false
   const selection = {source:details.source ?? 0,quality:details.quality ?? 0}
+  return mountVariant(title,episode,library.profile(),selection,details,request)
+}
+function mountVariant(title,episode,profile,selection,details,requestID) {
   const variant = episode?.sources[selection.source]?.variants[selection.quality]
   if (!variant) throw Error('Diese Quelle oder Qualitätsstufe ist nicht verfügbar.')
-  const profile = library.profile()
   stop(false)
-  player = new WebContentsView({webPreferences:{...webOptions,partition:'kino-public-player',preload:path.join(__dirname,'preload.cjs')}})
+  player = new WebContentsView({webPreferences:{...webOptions,enableBlinkFeatures:'AudioVideoTracks',
+    partition:'kino-public-player',preload:path.join(__dirname,'preload.cjs')}})
   player.setBackgroundColor('#000000')
   const view = player.webContents
   view.setWindowOpenHandler(()=>({action:'deny'}))
   view.on('will-navigate',event=>event.preventDefault())
   const token = playToken = Symbol()
   const local={...episode.segments,...variant.segments}
+  const previous=profile.history[title.url]?.episodes[episode.season+':'+episode.episode]
+  const resumePosition=Number.isFinite(details.position) && details.position>=0?details.position:
+    previous && !previous.finished?previous.time:0
   const info = playback = {contents:view,audioReady:false,title,episode,profile,selection,
-    skipped:details.skipped instanceof Set ? details.skipped : new Set(),request:details,
-    resumed:false,lastSaved:0,startedAt:Date.now(),markers:[]}
+    skipped:details.skipped instanceof Set ? details.skipped : new Set(),request:details,requestID,resumePosition,
+    attempted:details.attempted instanceof Set ? details.attempted : new Set(),resumed:false,lastSaved:0,
+    stalledAt:Date.now(),markers:readSegments(null,local)}
   updateOutputMute(info)
   view.on('before-input-event',playerKey)
-  void getMarkers(title,episode,local).then(markers=>{if (token===playToken) info.markers=markers})
+  void getMarkers(title,episode,local).then(markers=>{
+    if (token!==playToken) return
+    info.markers=markers
+    fullscreen.update({segments:timelineSegments(markers,info.duration)})
+  })
   win.contentView.addChildView(player)
   fullscreen.bounds(details.bounds)
   fullscreen.attach(player,{title:title.title+(title.isSeries?' · S'+episode.season+' F'+episode.episode:''),audio,
     sources:episode.sources.map(value=>({name:value.name,heights:value.variants.map(item=>item.height)})),
-    ...selection,next:Boolean(nextEpisode(info)),sleep:sleepAtEnd?'episode':sleepMinutes})
+    ...selection,next:Boolean(nextEpisode(info)),sleep:sleepAtEnd?'episode':sleepMinutes,segments:[],
+    notice:details.notice ?? null,audioLanguage:deviceLibrary.audioLanguage()})
   void view.loadFile(path.join(__dirname,'media.html'),{hash:encodeURIComponent(variant.url)})
-    .catch(()=>{if (token===playToken) fullscreen.update({error:'Der Player konnte nicht geladen werden.'})})
+    .catch(()=>{if (token===playToken) recoverVariant(info)})
   timer=setInterval(()=>void poll(info,view,token).catch(()=>{}),750)
   return true
 }
@@ -338,6 +381,14 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
       return videoCommand('seek',time)
     }
     if (payload.action === 'source' || payload.action === 'quality') return switchVariant(playback,payload.action,payload.value)
+    if (payload.action === 'audio-language') {
+      if (typeof payload.value!=='string') return false
+      const language=payload.value.trim().toLowerCase()
+      if (language && (language.length>40 || !/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(language))) return false
+      deviceLibrary.setAudioLanguage(language)
+      fullscreen.update({audioLanguage:language})
+      return true
+    }
     if (payload.action === 'sleep') return setSleep(payload.value)
     if (['toggle','jump','seek','set-volume','mute','volume','fullscreen'].includes(payload.action)) return videoCommand(payload.action,payload.value)
     return false
@@ -345,6 +396,7 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (!win || event.sender !== win.webContents || event.senderFrame?.url !== win.webContents.getURL()) throw Error('Zugriff verweigert.')
   if (action === 'updates-state') return updater.state()
   if (action === 'updates-check') return updater.check()
+  if (action === 'updates-install') return updater.install()
   if (action === 'sync-state') return sync.status()
   if (action === 'sync-sign-in') { await closePlayback(); return sync.signIn() }
   if (action === 'sync-sign-out') { await closePlayback(); return sync.signOut() }
@@ -437,7 +489,8 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
 function createWindow() {
   const chrome = process.platform === 'darwin' ? {titleBarStyle:'hiddenInset'} : {autoHideMenuBar:true}
   win = new BrowserWindow({ width:1320, height:860, minWidth:740, minHeight:540, ...chrome,
-    backgroundColor:'#121016', webPreferences:{ ...webOptions, preload:path.join(__dirname,'preload.cjs') } })
+    backgroundColor:'#090b11', icon:path.join(__dirname,'art','mark.png'),
+    webPreferences:{ ...webOptions, preload:path.join(__dirname,'preload.cjs') } })
   win.webContents.setWindowOpenHandler(() => ({ action:'deny' }))
   win.webContents.on('will-navigate', event => event.preventDefault())
   fullscreen = createFullscreen(win)

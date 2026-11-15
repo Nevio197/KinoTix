@@ -9,53 +9,71 @@
 <script src="media.js" defer></script>
 </head>
 <body>
-<video playsinline aria-label="Videowiedergabe"></video>
-<p id="error" role="status" hidden></p>
+<video id="video" playsinline aria-label="Videowiedergabe"></video>
+<div class="messages">
+  <p id="error" role="status" hidden></p>
+  <p id="notice" role="status" hidden></p>
+</div>
 <div id="controls">
-  <div class="top">
+  <header class="top">
     <button id="back" type="button" aria-label="Zurück zum Titel" title="Zurück zum Titel"></button>
     <h1 id="title"></h1>
-  </div>
+  </header>
   <div class="bottom">
-    <div id="skip" aria-live="polite">
-      <button id="marker" class="pill" type="button" hidden></button>
-      <button id="undo" class="pill" type="button" hidden></button>
-    </div>
-    <div id="countdown" hidden>
-      <output id="remaining" aria-live="polite"></output>
-      <button id="cancel" class="pill" type="button">Abbrechen</button>
-    </div>
-    <input id="seek" type="range" min="0" max="1" step="0.1" value="0" aria-label="Abspielposition" disabled>
-    <div class="bar">
-      <div class="group">
-        <button id="play" type="button" aria-label="Abspielen" title="Abspielen"></button>
-        <button id="mute" type="button" aria-label="Stumm schalten" title="Stumm schalten"></button>
-        <input id="volume" type="range" min="0" max="100" value="100" aria-label="Lautstärke">
-        <span id="time">0:00</span>
+    <div class="cues">
+      <div id="skip" aria-live="polite" hidden>
+        <button id="marker" class="pill" type="button" hidden></button>
+        <button id="undo" class="pill" type="button" hidden></button>
       </div>
-      <div class="group">
-        <button id="next" type="button" aria-label="Nächste Folge" title="Nächste Folge" hidden></button>
-        <button id="options" type="button" aria-label="Quelle und Qualität" title="Quelle und Qualität" aria-controls="options-panel" aria-expanded="false"></button>
-        <button id="pip" type="button" aria-label="Bild-in-Bild" title="Bild-in-Bild"></button>
-        <button id="timer" type="button" aria-label="Schlaftimer" title="Schlaftimer" aria-controls="timer-panel" aria-expanded="false"></button>
-        <button id="fullscreen" type="button" aria-label="Vollbild" title="Vollbild"></button>
+      <div id="countdown" hidden>
+        <output id="remaining" aria-live="polite"></output>
+        <button id="cancel" class="pill" type="button">Abbrechen</button>
       </div>
     </div>
-    <div class="panel" id="options-panel" hidden>
-      <label for="source">Quelle</label>
-      <select id="source"></select>
-      <label for="quality">Qualität</label>
-      <select id="quality"></select>
+    <div class="deck">
+      <div id="timeline">
+        <div class="timeline-track" aria-hidden="true">
+          <div id="played"></div>
+          <div id="segments"></div>
+        </div>
+        <input id="seek" type="range" min="0" max="1" step="0.1" value="0" aria-label="Abspielposition" aria-describedby="segment-description" disabled>
+        <span class="sr-only" id="segment-description"></span>
+        <div id="seek-preview" aria-hidden="true" hidden>
+          <canvas id="preview-frame" width="224" height="126" hidden></canvas>
+          <div class="preview-label"><strong id="preview-time"></strong><span id="preview-segment" hidden></span></div>
+        </div>
+      </div>
+      <div class="bar">
+        <div class="group">
+          <button id="play" type="button" aria-label="Abspielen" title="Abspielen"></button>
+          <button id="mute" type="button" aria-label="Stumm schalten" title="Stumm schalten"></button>
+          <input id="volume" type="range" min="0" max="100" value="100" aria-label="Lautstärke">
+          <span id="time">0:00</span>
+        </div>
+        <div class="group">
+          <button id="next" type="button" aria-label="Nächste Folge" title="Nächste Folge" hidden></button>
+          <button id="options" type="button" aria-label="Wiedergabeeinstellungen" title="Wiedergabeeinstellungen" aria-controls="options-panel" aria-expanded="false"></button>
+          <button id="pip" type="button" aria-label="Bild-in-Bild" title="Bild-in-Bild"></button>
+          <button id="timer" type="button" aria-label="Schlaftimer" title="Schlaftimer" aria-controls="timer-panel" aria-expanded="false"></button>
+          <button id="fullscreen" type="button" aria-label="Vollbild" title="Vollbild"></button>
+        </div>
+      </div>
     </div>
-    <div class="panel" id="timer-panel" hidden>
-      <label for="sleep">Schlaftimer</label>
-      <select id="sleep">
-        <option value="">Aus</option>
-        <option value="15">15 Minuten</option><option value="30">30 Minuten</option>
-        <option value="45">45 Minuten</option><option value="60">60 Minuten</option>
-        <option value="90">90 Minuten</option><option value="episode">Nach diesem Video</option>
-      </select>
-    </div>
+    <section class="panel" id="options-panel" aria-label="Wiedergabeeinstellungen" hidden>
+      <label>Quelle <select id="source"></select></label>
+      <label>Qualität <select id="quality"></select></label>
+      <label id="audio-field" hidden>Tonspur <select id="audio-track"></select></label>
+    </section>
+    <section class="panel" id="timer-panel" aria-label="Schlaftimer" hidden>
+      <label>Schlaftimer
+        <select id="sleep">
+          <option value="">Aus</option>
+          <option value="15">15 Minuten</option><option value="30">30 Minuten</option>
+          <option value="45">45 Minuten</option><option value="60">60 Minuten</option>
+          <option value="90">90 Minuten</option><option value="episode">Nach diesem Video</option>
+        </select>
+      </label>
+    </section>
   </div>
 </div>
 </body>

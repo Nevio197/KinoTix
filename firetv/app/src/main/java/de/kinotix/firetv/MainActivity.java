@@ -908,6 +908,11 @@ public final class MainActivity extends Activity {
                 .setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
         });
         field.setOnEditorActionListener((view, action, event) -> {
+            if (event != null && (event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    || event.getKeyCode() == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                if (event.getAction() == KeyEvent.ACTION_UP) submit.run();
+                return true;
+            }
             if (action == EditorInfo.IME_ACTION_DONE) { submit.run(); return true; }
             return false;
         });

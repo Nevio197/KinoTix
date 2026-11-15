@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="KinoTixTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:colorAccent">#BAACFF</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">#12101A</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

@@ -2,6 +2,8 @@
 
 Die Android-App läuft eigenständig auf Fire OS ab Version 6 (Android API 25). Sie braucht Internetzugang für HTTPS-Quellen und GitHub-Updates. Die App nutzt die Android-Version von Fire OS. Vega OS verwendet ein eigenes App-Format.
 
+Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.3) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
+
 Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. Über **Quelle hinzufügen** akzeptiert KinoTix direkte HTTPS-Videos, Medienlisten und KinoTix-Kataloge mit statischen HTML-Quellen. Die lokale Dateiauswahl hängt von den verfügbaren Apps auf dem Gerät ab. Wiedergabestand, Merkliste und Profile bleiben auf dem Fire TV gespeichert. Bei der Wiedergabe blendet sich die Leiste nach kurzer Zeit aus. Mit einer Richtungstaste lässt sie sich wieder einblenden. Die mittlere Taste pausiert die Wiedergabe und setzt sie fort.
 
 ## Updates
@@ -19,6 +21,12 @@ Installiere JDK 17, die Android Platform 34 und Build-Tools 35.0.0. Setze `JAVA_
 - Erhöhe für ein Update `firetv/version.txt`, baue die APK und veröffentliche sie mit dem passenden Tag als Vorabversion in diesem Repository. Markiere sie dabei nicht als neueste allgemeine Version. Teste das Upgrade aus einer älteren signierten APK mit einem vorhandenen Wiedergabestand.
 
 Amazon beschreibt die ADB-Erstinstallation für Entwickler. Distribution über den Amazon Appstore hat einen eigenen Veröffentlichungsweg. [Fire TV über ADB verbinden](https://developer.amazon.com/docs/fire-tv/connecting-adb-to-device.html)
+
+## Geprüfte Updates
+
+- Im Android-TV-12-Emulator lud 0.1.0 beim Start die signierte 0.1.1 von GitHub. Nach Bestätigung im Installer war 0.1.1 installiert. Eine zuvor veränderte Wiedergabeeinstellung blieb erhalten.
+- Auf einem Fire TV Stick Lite mit Fire OS 7.7.1.7 lud und prüfte 0.1.2 die signierte 0.1.3 bei einem echten App-Start. Die Geräteseite zeigte **Update installieren** an.
+- Im Emulator liefen die Fernbedienungsaktionen, Spulen und Fortsetzen nach Neustart. Mit einem HTTPS-WebM-Clip wurde das Videobild verifiziert. Bei der verwendeten H.264-Testdatei konnte der Emulator den Decoder nicht starten.
 
 ## Umfang dieser Ausgabe
 

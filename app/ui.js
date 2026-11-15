@@ -344,6 +344,7 @@ async function showAppSettings() {
     action('Verbindung',showNetworkSettings,'settings-row'))
   const updates = make('section','','settings-section')
   const progress = make('progress','','update-progress')
+  progress.hidden = true
   progress.max = 100
   progress.setAttribute('aria-label','Downloadfortschritt')
   const controls = make('div','','actions')
@@ -352,17 +353,19 @@ async function showAppSettings() {
     install.disabled=true
     if (!await request('updates-install')) install.disabled=false
   },'primary')
+  check.disabled = true
+  install.hidden = true
   controls.append(check,install)
   updates.append(make('h3','Software-Updates'),report,progress,controls)
   updateView = state => {
-    const messages={unconfigured:'Dieser Build hat keine Update-Quelle.',idle:'Sucht beim Start automatisch nach Updates.',
+    const messages={unconfigured:'Für automatische Updates installiere die GitHub-Ausgabe von KinoTix.',idle:'Sucht beim Start auf GitHub nach Updates.',
       checking:'Updates werden geprüft …',current:'KinoTix ist aktuell.',downloading:'Update '+(state.available||'')+' wird geladen · '+(state.percent??0)+' %',
       ready:'Version '+state.available+' ist bereit und wird beim Beenden installiert.',error:'Das Update konnte gerade nicht geladen werden.'}
     report.textContent='Version '+state.current+' · '+(messages[state.phase] || '')
     progress.hidden = state.phase !== 'downloading'
     progress.value = state.percent ?? 0
-    check.hidden = state.phase === 'ready' || state.phase === 'unconfigured'
-    check.disabled = state.phase === 'checking' || state.phase === 'downloading'
+    check.hidden = state.phase === 'ready'
+    check.disabled = ['unconfigured','checking','downloading'].includes(state.phase)
     install.hidden = state.phase !== 'ready'
   }
   dialog('Einstellungen',tools,updates)

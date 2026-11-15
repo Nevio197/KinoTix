@@ -610,10 +610,10 @@ function createWindow() {
       if (!win.isDestroyed()) win.close()
     })
   })
-  win.loadFile(path.join(__dirname,'index.html')).then(()=>updater.start()).catch(console.error)
+  win.loadFile(path.join(__dirname,'index.html')).catch(console.error)
 }
 app.on('second-instance', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus() } })
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   folder = app.getPath('userData')
   fs.mkdirSync(folder,{recursive:true})
   networkSettings = openNetworkSettings(folder, app)
@@ -640,6 +640,7 @@ app.whenReady().then(async () => {
     { role:'appMenu' }, { role:'editMenu' }, { role:'viewMenu', submenu:[{ role:'togglefullscreen' }] }, { role:'windowMenu' },
   ]))
   createWindow()
+  updater.start()
   void sync.start()
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow() })
 })

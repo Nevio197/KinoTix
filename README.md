@@ -28,7 +28,7 @@ Auf dem Mac den letzten Befehl durch `npm run mac:local --prefix windows` ersetz
 
 ## Updates und öffentliche Releases
 
-Der GitHub-Build prüft beim Start auf neue stabile Releases. Der Updater lädt im Hintergrund und installiert beim regulären Beenden. Danach reicht es, KinoTix wieder zu öffnen.
+Der GitHub-Build prüft bei jedem Programmstart auf neue stabile Releases. Unter **Einstellungen → Software-Updates → Jetzt prüfen** kannst du die Suche auch von Hand starten. Der Updater lädt im Hintergrund und installiert beim regulären Beenden. Danach reicht es, KinoTix wieder zu öffnen.
 
 Der Release-Workflow baut bei Tags `vX.Y.Z`, die zu `app/package.json` passen, zunächst den Windows-Installer und dessen Update-Dateien. Der Windows-Updater vertraut dem im Build hinterlegten Ed25519-Schlüssel. Er prüft die Signatur des Manifests und anschließend Größe und SHA-256 des Installers. Der Installer verwendet weiterhin die üblichen Windows-Installationsregeln.
 

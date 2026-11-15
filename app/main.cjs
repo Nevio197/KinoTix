@@ -22,6 +22,7 @@ const playerScript = "document.getElementById('video')"
 const mediaTimeout = 12000
 const webOptions = { sandbox: true, contextIsolation: true, nodeIntegration: false }
 const control = controller(playerScript)
+const catalogViews = new Set()
 let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, folder
 let catalog, deviceCatalog, playbackRequest=0
 let networkSettings, networkRestartPending = false
@@ -52,6 +53,9 @@ function makeCatalogView(partition,topHosts,resourceHosts) {
     ['mainFrame','subFrame'].includes(details.resourceType)?topHosts:resourceHosts)}))
   const view=new WebContentsView({webPreferences:{...webOptions,partition}})
   const contents=view.webContents
+  // An unattached view owns its WebContents and must stay alive until the request closes it.
+  catalogViews.add(view)
+  contents.once('destroyed',()=>catalogViews.delete(view))
   contents.setWindowOpenHandler(()=>({action:'deny'}))
   const block=(event,value)=>{if (!permitted(typeof value==='string'?value:event.url,topHosts)) event.preventDefault()}
   contents.on('will-navigate',block)

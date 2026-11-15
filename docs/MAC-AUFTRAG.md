@@ -1,6 +1,6 @@
 # Aufgabe für das MacBook
 
-Teste **KinoTix 0.4.2** aus diesem Quellcode auf macOS. Verwende für Release-Tests die App-ID `de.kinotix.desktop` und die eigenen Zugangsdaten für Signierung und Notarisierung.
+Teste **KinoTix 0.4.3** aus diesem Quellcode auf macOS. Verwende für Release-Tests die App-ID `de.kinotix.desktop` und die eigenen Zugangsdaten für Signierung und Notarisierung.
 
 ## 1. Eigenen Player prüfen
 

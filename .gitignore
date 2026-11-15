@@ -1,0 +1,9 @@
+/.DS_Store
+/dist/
+/windows/node_modules/
+/app/node_modules/
+/app/google-desktop.json
+/app/supabase.json
+*.pem
+*.p12
+*.pfx

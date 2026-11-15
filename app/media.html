@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; media-src file: https:">
+<title>KinoTix – Video</title>
+<link rel="stylesheet" href="media.css">
+<script src="media.js" defer></script>
+</head>
+<body>
+<video playsinline aria-label="Videowiedergabe"></video>
+<p id="error" role="status" hidden></p>
+<div id="controls">
+  <div class="top">
+    <button id="back" type="button" aria-label="Zurück zum Titel" title="Zurück zum Titel"></button>
+    <h1 id="title"></h1>
+  </div>
+  <div class="bottom">
+    <div id="skip" aria-live="polite">
+      <button id="marker" class="pill" type="button" hidden></button>
+      <button id="undo" class="pill" type="button" hidden></button>
+    </div>
+    <div id="countdown" hidden>
+      <output id="remaining" aria-live="polite"></output>
+      <button id="cancel" class="pill" type="button">Abbrechen</button>
+    </div>
+    <input id="seek" type="range" min="0" max="1" step="0.1" value="0" aria-label="Abspielposition" disabled>
+    <div class="bar">
+      <div class="group">
+        <button id="play" type="button" aria-label="Abspielen" title="Abspielen"></button>
+        <button id="mute" type="button" aria-label="Stumm schalten" title="Stumm schalten"></button>
+        <input id="volume" type="range" min="0" max="100" value="100" aria-label="Lautstärke">
+        <span id="time">0:00</span>
+      </div>
+      <div class="group">
+        <button id="next" type="button" aria-label="Nächste Folge" title="Nächste Folge" hidden></button>
+        <button id="options" type="button" aria-label="Quelle und Qualität" title="Quelle und Qualität" aria-controls="options-panel" aria-expanded="false"></button>
+        <button id="pip" type="button" aria-label="Bild-in-Bild" title="Bild-in-Bild"></button>
+        <button id="timer" type="button" aria-label="Schlaftimer" title="Schlaftimer" aria-controls="timer-panel" aria-expanded="false"></button>
+        <button id="fullscreen" type="button" aria-label="Vollbild" title="Vollbild"></button>
+      </div>
+    </div>
+    <div class="panel" id="options-panel" hidden>
+      <label for="source">Quelle</label>
+      <select id="source"></select>
+      <label for="quality">Qualität</label>
+      <select id="quality"></select>
+    </div>
+    <div class="panel" id="timer-panel" hidden>
+      <label for="sleep">Schlaftimer</label>
+      <select id="sleep">
+        <option value="">Aus</option>
+        <option value="15">15 Minuten</option><option value="30">30 Minuten</option>
+        <option value="45">45 Minuten</option><option value="60">60 Minuten</option>
+        <option value="90">90 Minuten</option><option value="episode">Nach diesem Video</option>
+      </select>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "meine-medienquelle",
+  "name": "Meine Medienquelle",
+  "origin": "https://katalog.example.org",
+  "index": "https://katalog.example.org/sitemap.xml",
+  "playerHosts": ["player.example.org"],
+  "mediaHosts": ["video.example.org"],
+  "listing": {
+    "root": "#catalog",
+    "items": "#catalog a[href]"
+  },
+  "detail": {
+    "title": "h1",
+    "description": ".description",
+    "poster": ".cover img",
+    "imdb": "a[href*=\"imdb.com/title/tt\"]",
+    "groups": ".video",
+    "controls": "[data-episode][data-source]",
+    "episodeAttribute": "data-episode",
+    "sourceAttribute": "data-source",
+    "iframe": "iframe[src]",
+    "seriesPrefix": "/series/"
+  },
+  "player": {}
+}

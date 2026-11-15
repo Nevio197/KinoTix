@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; script-src 'self'; style-src 'self'">
+<title>KinoTix</title>
+<link rel="stylesheet" href="style.css">
+<script src="ui.js" defer></script>
+</head>
+<body>
+<div class="titlebar"></div>
+<header>
+  <button id="home" class="wordmark" aria-label="Startseite"><span aria-hidden="true">▶</span> KinoTix</button>
+  <form id="search" role="search">
+    <label class="sr-only" for="query">Film oder Serie</label>
+    <input type="search" id="query" placeholder="Film oder Serie suchen" autocomplete="off">
+    <button type="submit">Suchen</button>
+  </form>
+  <button id="collections">Merkliste</button>
+  <button id="profile" aria-label="Profile">Mein Profil</button>
+  <button id="account">Google-Konto</button>
+  <button id="app-settings">Einstellungen</button>
+  <button id="from-link" class="primary">Medium hinzufügen</button>
+</header>
+<main id="main"></main>
+<dialog id="settings-dialog"><div id="settings-content"></div></dialog>
+<dialog id="link-dialog">
+  <form id="link-form">
+    <h2>Medium hinzufügen</h2>
+    <p>Wähle eine Videodatei, importiere eine JSON-Medienliste oder gib einen direkten HTTPS-Link ein.</p>
+    <input type="text" name="title" placeholder="Titel (optional)" maxlength="150" aria-label="Titel (optional)">
+    <input type="text" name="imdb" placeholder="IMDb-ID für Zeitmarken (optional)" maxlength="14" aria-label="IMDb-ID (optional)">
+    <input type="url" name="url" id="url" placeholder="https://…/video.mp4" aria-label="HTTPS-Videolink" required>
+    <p class="inline-error" role="status"></p>
+    <div class="actions"><button type="button" id="cancel-link">Abbrechen</button><button type="button" id="catalog-open">Katalog hinzufügen</button><button type="button" id="file-open">Datei oder Liste wählen</button><button type="submit" class="primary">Link hinzufügen</button></div>
+  </form>
+</dialog>
+</body>
+</html>

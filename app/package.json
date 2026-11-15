@@ -1,0 +1,10 @@
+{
+  "name": "kinotix",
+  "productName": "KinoTix",
+  "version": "0.3.1",
+  "description": "KinoTix für Windows und macOS mit eigener Medienbibliothek",
+  "main": "main.cjs",
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "id": "kinotix-beispielserie",
+  "title": "Beispielserie",
+  "episodes": [
+    {
+      "season": 1,
+      "episode": 1,
+      "segments": {
+        "intro": [0, 15],
+        "outro": [70, 90],
+        "post_credits": [78, 83]
+      },
+      "sources": [
+        {
+          "name": "Eigene Medien",
+          "variants": [
+            { "file": "folge1-1080.mp4", "height": 1080 },
+            { "file": "folge1-720.mp4", "height": 720 }
+          ]
+        },
+        { "name": "Archiv", "file": "folge1-archiv.mp4" }
+      ]
+    },
+    {
+      "season": 1,
+      "episode": 2,
+      "sources": [
+        { "name": "Eigene Medien", "file": "folge2.mp4" }
+      ]
+    }
+  ]
+}

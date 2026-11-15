@@ -1,0 +1,11 @@
+{
+  "name": "kinotix-windows-build",
+  "private": true,
+  "scripts": {
+    "windows": "electron-builder --config build-config.cjs --win --x64 --publish never",
+    "mac": "electron-builder --config build-config.cjs --mac --universal --publish never"
+  },
+  "devDependencies": {
+    "electron-builder": "26.18.0"
+  }
+}

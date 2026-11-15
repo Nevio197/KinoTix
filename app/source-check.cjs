@@ -9,6 +9,8 @@ const redirects = new Set([301,302,303,307,308])
 const securityMarker = /(^|\.)landingpage-cuii(?:[.-]|$)/i
 const accessibleMessage = 'Prüfe die Adresse und versuche es erneut.'
 const websiteMessage = 'Das ist eine Webseite. Nutze einen direkten Videolink, einen Kataloglink oder eine Katalogdatei.'
+const dnsRedirectIssue = {code:'dns-blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}
+const dnsErrorCodes = new Set(['ERR_NAME_NOT_RESOLVED','ERR_NAME_RESOLUTION_FAILED','ERR_DNS_TIMED_OUT','ENOTFOUND','EAI_AGAIN'])
 
 function address(value) {
   const input = typeof value === 'string' ? value.trim() : ''
@@ -39,11 +41,19 @@ function httpIssue(status) {
   return {code:'http',message:'Die Quelle antwortet mit HTTP ' + status + '. ' + accessibleMessage}
 }
 
+function isDnsError(error) {
+  const message = typeof error === 'string' ? error : error?.message
+  const netCode = /^(?:net::)?(ERR_[A-Z_]+)\b/.exec(message ?? '')?.[1]
+  return [error?.code,error?.cause?.code,netCode].some(code=>dnsErrorCodes.has(code))
+}
+
 async function networkIssue(error, url, detectBlock = blockedHost) {
-  if (await detectBlock(url.hostname)) return {code:'dns-blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}
+  if (isDnsError(error)) {
+    return {code:'dns',message:'Der Name der Quelle konnte in diesem Netz nicht gefunden werden.'}
+  }
   const detail = [error?.name,error?.code,error?.message,error?.cause?.code].filter(Boolean).join(' ')
   if (/cert|ssl|tls|certificate/i.test(detail)) return {code:'certificate',message:'Die sichere Verbindung zur Quelle konnte nicht aufgebaut werden.'}
-  if (/NAME_NOT_RESOLVED|ENOTFOUND|EAI_AGAIN/i.test(detail)) return {code:'dns',message:'Der Name der Quelle konnte in diesem Netz nicht gefunden werden.'}
+  if (await detectBlock(url.hostname)) return dnsRedirectIssue
   if (/timed? ?out|timeout/i.test(detail)) return {code:'timeout',message:'Die Quelle antwortet zu langsam. Versuche es gleich noch einmal.'}
   return {code:'connection',message:'Die Quelle ist gerade nicht erreichbar. ' + accessibleMessage}
 }
@@ -51,7 +61,7 @@ async function networkIssue(error, url, detectBlock = blockedHost) {
 async function request(url, fetcher, signal, detectBlock) {
   let target = url
   for (let count = 0; count < 6; count++) {
-    if (await detectBlock(target.hostname)) return {issue:{code:'dns-blocked',message:'Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.'}}
+    if (await detectBlock(target.hostname)) return {issue:dnsRedirectIssue}
     let response
     try {
       response = await fetcher(target.href,{redirect:'manual',credentials:'omit',cache:'no-store',signal})
@@ -122,14 +132,17 @@ function supportedVideo(type, ...paths) {
     paths.some(pathname=>formats.has(path.posix.extname(pathname).toLowerCase()))
 }
 
-async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCatalog} = {}) {
+async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCatalog,withDnsFallback=operation=>operation()} = {}) {
   let url
   try { url = address(value) }
   catch (error) { return {kind:'invalid',message:error instanceof TypeError?'Gib eine gültige HTTPS-Adresse ein.':error.message} }
   const info = {url:url.href,hostname:url.hostname}
   const result = (kind,message,extra) => ({...info,kind,message,...extra})
   const unavailable = ({code,message}) => result('unreachable',message,{code})
-  const signal = AbortSignal.timeout(7000)
+  const load = address => withDnsFallback(
+    () => request(address,fetcher,AbortSignal.timeout(7000),detectBlock),
+    result => result?.issue?.code,
+  )
 
   async function recognizeCatalog(loaded) {
     let contents
@@ -152,7 +165,7 @@ async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCa
     return result('catalog','Katalog erkannt: ' + source.name + '.',{name:source.name,items,source})
   }
 
-  const loaded = await request(url,fetcher,signal,detectBlock)
+  const loaded = await load(url)
   if (loaded.issue) return unavailable(loaded.issue)
   const {response,target} = loaded
   const type = mimeType(response)
@@ -167,7 +180,7 @@ async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCa
     catch (error) { return unavailable(await networkIssue(error,target,detectBlock)) }
     const link = linkedCatalog(contents.text,target)
     if (link) {
-      const manifest = await request(link,fetcher,signal,detectBlock)
+      const manifest = await load(link)
       if (manifest.issue) return unavailable(manifest.issue)
       return recognizeCatalog(manifest)
     }
@@ -178,4 +191,4 @@ async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCa
   return result('invalid','Die Adresse liefert weder ein unterstütztes Video noch einen KinoTix-Katalog.')
 }
 
-module.exports = { checkSource, blockedHost, networkIssue, httpIssue }
+module.exports = { checkSource, blockedHost, networkIssue, httpIssue, dnsRedirectIssue, isDnsError }

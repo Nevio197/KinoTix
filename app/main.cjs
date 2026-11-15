@@ -7,7 +7,7 @@ const { openMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
-const { checkSource, blockedHost } = require('./source-check.cjs')
+const { checkSource, blockedHost, isDnsError } = require('./source-check.cjs')
 const { openNetworkSettings } = require('./network-settings.cjs')
 const { createUpdater } = require('./public-updater.cjs')
 const { autoSkip, destination, markerService, readSegments, segmentKey, timelineSegments } = require('./segments.js')
@@ -65,12 +65,14 @@ function makeCatalogView(partition,topHosts,resourceHosts) {
 const catalogOptions={
   makeView:makeCatalogView,
   fetcher:(url,options)=>net.fetch(url,options),
-  detectBlock:hostname=>networkSettings?.state().active ? false : blockedHost(hostname),
+  detectBlock:hostname=>networkSettings.state().secureActive ? false : blockedHost(hostname),
+  withDnsFallback:(operation,resultCode)=>networkSettings.withDnsFallback(operation,resultCode),
 }
 const getTitle=url=>decodeTitle(url)?catalog.detail(url):media.detail(url)
 const inspectSource=(url,target)=>checkSource(url,{
   fetcher:catalogOptions.fetcher,
   detectBlock:catalogOptions.detectBlock,
+  withDnsFallback:catalogOptions.withDnsFallback,
   verifyCatalog:source=>target.check(source),
 })
 
@@ -271,8 +273,16 @@ function resumeDetails(info, current=info.lastObserved) {
   return {...info.request,position:current?.time ?? info.resumePosition,
     autoplay:current ? !current.paused : info.request.autoplay,skipped:info.skipped}
 }
-function recoverVariant(info) {
+function recoverVariant(info, mediaFailed = false) {
   if (playback!==info || info.requestID!==playbackRequest || info.failed) return false
+  if (mediaFailed && !info.resumed && info.startupDnsError) {
+    info.startupDnsError=false
+    if (networkSettings.retryDns('dns',info.startedWithSecureDns)) {
+      return mountVariant(info.title,info.episode,info.profile,info.selection,{
+        ...resumeDetails(info),attempted:info.attempted,notice:'Wiedergabe wird mit sicherem DNS erneut versucht.',
+      },info.requestID)
+    }
+  }
   const {sources}=info.episode
   const attempted=info.attempted
   attempted.add(sources[info.selection.source].variants[info.selection.quality].url)
@@ -296,7 +306,7 @@ async function poll(info, view, token) {
     const frame=view.mainFrame
     const value=await frame.executeJavaScript(readVideo).catch(()=>null)
     if (token !== playToken) return
-    if (value?.error) return recoverVariant(info)
+    if (value?.error) return recoverVariant(info,true)
     const now=Date.now()
     if (!value || !Number.isFinite(value.duration) || value.duration<=0) {
       if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
@@ -390,6 +400,7 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
   const info = playback = {contents:view,audioReady:false,title,episode,profile,selection,
     skipped:details.skipped instanceof Set ? details.skipped : new Set(),request:details,requestID,resumePosition,
     attempted:details.attempted instanceof Set ? details.attempted : new Set(),resumed:false,lastSaved:0,
+    mediaURL:variant.url,startedWithSecureDns:networkSettings.state().secureActive,
     stalledAt:Date.now(),markers:readSegments(null,local)}
   updateOutputMute(info)
   view.on('before-input-event',playerKey)
@@ -448,10 +459,10 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (action === 'updates-check') return updater.check()
   if (action === 'updates-install') return updater.install()
   if (action === 'network-state') return networkSettings.state()
-  if (action === 'network-set') return networkSettings.set(payload.secureDns)
+  if (action === 'network-set') return networkSettings.set(payload.mode)
   if (action === 'network-restart') {
-    const { secureDns, active } = networkSettings.state()
-    if (secureDns === active || quitting || networkRestartPending) return false
+    const { mode, activeMode } = networkSettings.state()
+    if (mode === activeMode || quitting || networkRestartPending) return false
     if (['checking','downloading','ready'].includes(updater.state().phase)) {
       throw Error('Schließe zuerst das laufende Update ab. Die DNS-Einstellung gilt beim nächsten Start.')
     }
@@ -594,7 +605,16 @@ app.whenReady().then(async () => {
   folder = app.getPath('userData')
   fs.mkdirSync(folder,{recursive:true})
   networkSettings = openNetworkSettings(folder, app)
-  session.fromPartition('kino-public-player').setPermissionRequestHandler((_contents,_permission,finish)=>finish(false))
+  const playerSession = session.fromPartition('kino-public-player')
+  playerSession.setPermissionRequestHandler((_contents,_permission,finish)=>finish(false))
+  playerSession.webRequest.onErrorOccurred({urls:['https://*/*']},details=>{
+    const info=playback
+    // Preview and buffering failures cannot restart an already loaded stream.
+    if (!info || info.failed || info.resumed || info.startedWithSecureDns || info.requestID!==playbackRequest) return
+    if (details.resourceType!=='media' || (details.webContentsId ?? details.webContents?.id)!==info.contents.id ||
+        details.url!==info.mediaURL || !isDnsError(details.error)) return
+    info.startupDnsError=true
+  })
   library = deviceLibrary = openLibrary(folder)
   media = openMedia(folder)
   catalog = deviceCatalog = openCatalog(folder,catalogOptions)

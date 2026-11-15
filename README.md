@@ -6,6 +6,8 @@ Desktop-Videoplayer für Windows x64 und macOS. Unter **Hinzufügen** kannst du 
 
 Auf der Startseite zeigt **Weiterschauen** den Fortschritt und die Restlaufzeit. Der Player bietet eine Bildvorschau und Zeitmarken auf der Zeitleiste, Lautstärke, Bild-in-Bild, Schlaftimer und Vollbild. Bei verfügbaren Alternativen kann KinoTix nach einem Wiedergabefehler die Quelle wechseln. Tonspurwahl, Qualität und nächste Folge erscheinen bei passenden Medien. [Zeitmarken für Intro und Abspann](docs/ZEITMARKEN.md)
 
+Bei Problemen mit der Namensauflösung versucht KinoTix automatisch einen zweiten Zugriff über verschlüsseltes DNS. Unter **Einstellungen → Verbindung** kannst du den Modus ändern. [Quellen und Verbindung](docs/KATALOGE.md)
+
 Katalogimport, Wiedergabe, Quellenwechsel, Zeitleistenvorschau und Tonspurwahl sind auf Windows geprüft. Google-Anmeldung und die Verbindung zum Supabase-Projekt wurden auf Windows live getestet. Der [MacBook-Auftrag](docs/MAC-AUFTRAG.md) beschreibt die ausstehenden Mac- und geräteübergreifenden Tests.
 
 ## Ohne Konto oder mit Google

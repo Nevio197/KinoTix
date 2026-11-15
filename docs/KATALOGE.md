@@ -4,7 +4,9 @@
 
 Wenn eine Webseite keine kompatiblen Katalogdaten anbietet, brauchst du einen direkten Videolink oder eine passende Katalogdatei. Bei Fehlern unterscheidet KinoTix eine fehlende Katalogstruktur von einem Problem beim Zugriff. Gespeicherte Kataloge findest du unter **Einstellungen → Kataloge**.
 
-Unter **Einstellungen → Verbindung** kannst du optional **Sicheres DNS** für KinoTix einschalten. Die App löst dann ihre Webadressen verschlüsselt über Cloudflare auf. Die Einstellung bleibt auf diesem Gerät und gilt ab dem nächsten Start. Die HTTPS-Zertifikatsprüfung bleibt aktiv.
+Unter **Einstellungen → Verbindung** ist **Automatisch** die Voreinstellung. KinoTix beginnt mit dem System-DNS. Scheitert die Namensauflösung, versucht die App dieselbe Adresse erneut mit verschlüsseltem DNS über Cloudflare. Nach einem Neustart beginnt die Automatik wieder mit dem System-DNS. Die HTTPS-Zertifikatsprüfung bleibt aktiv.
+
+Du kannst auch **System-DNS** oder **Immer sicheres DNS** auswählen. Diese Einstellung bleibt auf dem Gerät und gilt ab dem nächsten Start der App. Frühere manuelle Einstellungen werden übernommen.
 
 Die [Beispieldatei](../examples/katalog.json) zeigt das Format für eigene Quellen. Die Basisadresse steht unter `origin`. `listing` und `detail` beschreiben, wo KinoTix Titel und Folgen in der Seite erkennt. Unter `playerHosts` und `mediaHosts` stehen die zugelassenen Hostnamen. Optional liefert `index` eine XML-Sitemap für die Suche. Die Einstellungen werden als Daten gelesen und in einer getrennten Browser-Ansicht ohne Zugriff auf App-Dateien oder Kontodaten ausgewertet.
 

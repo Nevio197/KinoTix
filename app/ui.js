@@ -370,31 +370,37 @@ async function showAppSettings() {
   if (report.isConnected) updateView?.(state)
 }
 async function showNetworkSettings() {
-  const explanation = make('p','Mit sicherem DNS löst KinoTix Webadressen in der App verschlüsselt über Cloudflare auf. Die Einstellung gilt auf diesem Gerät.')
+  const explanation = make('p','Im Automatikmodus verwendet KinoTix zuerst die DNS-Einstellung deines Systems. Bei einem Problem mit der Namensauflösung versucht die App es erneut mit verschlüsseltem DNS über Cloudflare.')
   const current = make('p')
   current.setAttribute('role','status')
   const label = make('label','','dns-option')
-  const setting = make('input')
-  setting.type = 'checkbox'
-  label.append(setting,make('span','Sicheres DNS verwenden'))
+  const setting = selectInput('DNS-Modus',[
+    ['automatic','Automatisch'],
+    ['system','System-DNS'],
+    ['secure','Immer sicheres DNS'],
+  ])
+  label.append(make('span','DNS-Modus'),setting)
   const restart = action('KinoTix neu starten',async()=>request('network-restart'),'primary')
   const controls=make('div','','actions')
   controls.append(action('Zurück',showAppSettings),restart)
   const card=make('section','','settings-section')
   card.append(explanation,label,current,controls)
   function render(state) {
-    setting.checked=state.secureDns
-    restart.hidden=state.secureDns===state.active
+    setting.value=state.mode
+    restart.hidden=state.mode===state.activeMode
     current.textContent=restart.hidden
-      ? (state.active?'Sicheres DNS ist aktiv.':'KinoTix verwendet das DNS deines Systems.')
+      ? (state.secureActive?'Sicheres DNS ist aktiv.':'KinoTix verwendet gerade das DNS deines Systems.')
       : 'Die Änderung wird beim nächsten Start wirksam.'
   }
   render(await request('network-state'))
   setting.addEventListener('change',async()=>{
-    const next = setting.checked
     setting.disabled=true
-    try { render(await request('network-set',{secureDns:next})) }
-    catch (error) { setting.checked=!next;current.textContent=cleanError(error) }
+    try { render(await request('network-set',{mode:setting.value})) }
+    catch (error) {
+      const state=await request('network-state').catch(()=>null)
+      if (state) render(state)
+      current.textContent=cleanError(error)
+    }
     finally { setting.disabled=false }
   })
   dialog('Verbindung',card)

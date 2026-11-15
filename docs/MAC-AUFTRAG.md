@@ -1,6 +1,6 @@
 # Aufgabe für das MacBook
 
-Teste **KinoTix 0.4.3** aus diesem Quellcode auf macOS. Verwende für Release-Tests die App-ID `de.kinotix.desktop` und die eigenen Zugangsdaten für Signierung und Notarisierung.
+Teste **KinoTix 0.4.4** aus diesem Quellcode auf macOS. Verwende für Release-Tests die App-ID `de.kinotix.desktop` und die eigenen Zugangsdaten für Signierung und Notarisierung.
 
 ## 1. Eigenen Player prüfen
 
@@ -20,7 +20,8 @@ Teste **KinoTix 0.4.3** aus diesem Quellcode auf macOS. Verwende für Release-Te
 7. In der Mediathek nach angefangener Wiedergabe die große Karte unter **Weiterschauen** prüfen. Sie zeigt Restlaufzeit und Fortschritt. Startseite, Titelansicht und Dialoge an einem kleinen Fenster sowie im Vollbild prüfen.
 8. Beim Darüberfahren über die Zeitleiste die Bildvorschau prüfen. Mit zwei AAC-Tonspuren die Sprache wechseln. Eine absichtlich unbrauchbare erste Quelle mit einer intakten zweiten Quelle testen. Folge, Position, Pause, Qualität und bevorzugte Tonspur sollen beim Wechsel erhalten bleiben.
 9. Unter **Hinzufügen** einen direkten Videolink, einen HTTPS-Link zu einem KinoTix-Katalog und eine einfache Webseite prüfen. Die ersten beiden lassen sich übernehmen. Für die Webseite erscheint ein Hinweis. Über die gemeinsame Dateiauswahl je eine Videodatei, Medienliste und Katalogdatei testen.
-10. Unter **Einstellungen → Verbindung** sicheres DNS aktivieren, KinoTix neu starten und einen HTTPS-Katalog mit Suche und Wiedergabe prüfen. Danach ausschalten und nach einem Neustart die Systemeinstellung prüfen.
+10. Mit einem frischen Profil unter **Einstellungen → Verbindung** den Modus **Automatisch** prüfen. Einen HTTPS-Testkatalog laden, dessen Name über das System-DNS nicht aufgelöst wird, aber über verschlüsseltes DNS erreichbar ist. Katalog, Suche und Wiedergabe prüfen. Der Verbindungsdialog soll jetzt sicheres DNS als aktiv anzeigen. Anschließend die Modi **System-DNS** und **Immer sicheres DNS** jeweils nach einem Neustart prüfen.
+11. Mit einem Katalog prüfen, dass Startseite, Karten und Titelansicht die zugehörigen Cover anzeigen. Verwende für den Test eine Titelkarte mit einem Logo vor dem eigentlichen, verzögert geladenen Cover.
 
 ## 2. Google-Konto und Gastmodus prüfen
 

@@ -3,7 +3,7 @@ const path=require('node:path')
 const {createHash}=require('node:crypto')
 const {setTimeout:delay}=require('node:timers/promises')
 const {https,config,decodeTitle,titleID,episodeID,catalogRecord}=require('./catalog-format.cjs')
-const {blockedHost,networkIssue,httpIssue}=require('./source-check.cjs')
+const {blockedHost,networkIssue,httpIssue,dnsRedirectIssue}=require('./source-check.cjs')
 
 const reader=fs.readFileSync(path.join(__dirname,'catalog-reader.js'),'utf8')
 const reliableID=value=>typeof value==='string' && /^tt\d{7,12}$/.test(value)?value:undefined
@@ -32,7 +32,7 @@ function cleanRow(raw,source) {
     provider:source.name,isSeries:raw.isSeries===true || Boolean(source.detail.seriesPrefix && url.pathname.startsWith(source.detail.seriesPrefix))}
 }
 
-function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost}) {
+function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,withDnsFallback=operation=>operation()}) {
   const filename=path.join(folder,'catalogs.json')
   const records=new Map()
   try {
@@ -89,14 +89,15 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost}) {
     return update(source)
   }
 
-  async function read(source,address,rules,accept) {
-    const url=safeURL(address)
-    if (!url) throw Error('Die Quelle hat eine ungültige Adresse.')
-    if (rules.listing && await detectBlock(url.hostname)) {
-      throw sourceError('dns-blocked','Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.')
-    }
+  function read(source,address,rules,accept) {
+    return withDnsFallback(()=>readOnce(source,address,rules,accept))
+  }
+  async function readOnce(source,address,rules,accept) {
     const mainHosts=rules.player?[...source.playerHosts,...source.mediaHosts]:
       [new URL(source.origin).hostname,...source.catalogHosts]
+    const url=safeURL(address,mainHosts)
+    if (!url) throw Error('Die Quelle hat eine ungültige Adresse.')
+    if (await detectBlock(url.hostname)) throw sourceError(dnsRedirectIssue.code,dnsRedirectIssue.message)
     const allowed=[...mainHosts,...source.resourceHosts]
     const signature=createHash('sha256').update(JSON.stringify(allowed)).digest('hex').slice(0,12)
     const contents=makeView('kinotix-catalog-'+source.id+'-'+signature,mainHosts,allowed)
@@ -109,7 +110,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost}) {
         if (status>=400) fail(httpIssue(status))
       })
       void contents.loadURL(url.href).catch(async error=>{
-        if (!navigation.signal.aborted) fail(await networkIssue(error,url,rules.listing?()=>false:detectBlock))
+        if (!navigation.signal.aborted) fail(await networkIssue(error,url,detectBlock))
       })
     })
     const run=(async()=>{
@@ -144,7 +145,16 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost}) {
     if (!source.index) return []
     if (!index.has(source.id)) {
       const operation=(async()=>{
-        const response=await fetcher(source.index,{redirect:'error',signal:AbortSignal.timeout(8000)})
+        const url=new URL(source.index)
+        const response=await withDnsFallback(async()=>{
+          if (await detectBlock(url.hostname)) throw sourceError(dnsRedirectIssue.code,dnsRedirectIssue.message)
+          try {
+            return await fetcher(url.href,{redirect:'error',signal:AbortSignal.timeout(8000)})
+          } catch (error) {
+            const {code,message}=await networkIssue(error,url,detectBlock)
+            throw sourceError(code,message)
+          }
+        })
         if (!response.ok || !response.body) throw Error('Der Suchindex ist nicht erreichbar.')
         let bytes=0, xml=''
         const decoder=new TextDecoder()

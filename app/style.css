@@ -125,7 +125,7 @@ main.loading { display:grid; place-content:center }
 .notice { padding:25px 28px; border:1px solid var(--border); border-radius:16px; background:var(--surface) }
 .notice p { margin-top:7px; max-width:68ch }
 .import-shelf { margin-top:30px }
-.import-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px }
+.import-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px }
 .import-card { width:100%; min-height:110px; display:grid; grid-template-columns:auto 1fr auto; justify-items:start; padding:21px; gap:14px; border-radius:15px; text-align:left; background:#141924; font-weight:650; font-size:1rem }
 .import-card .import-icon { color:var(--accent); display:grid; place-items:center; width:42px; height:42px; border-radius:11px; background:#273651 }
 .import-card > .icon { color:var(--dim); width:17px }
@@ -159,14 +159,23 @@ dialog .actions { justify-content:flex-end }
 .named-form input { flex:1; min-width:130px }
 .inline-error { color:#ffadad }
 .inline-error:empty { display:none }
-.import-options { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-bottom:19px }
+.import-options { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:22px; padding-top:17px; border-top:1px solid var(--border) }
 .import-options button { min-height:48px }
 .import-options .icon,.settings-row .icon { color:var(--accent) }
+.source-input { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:stretch; gap:9px }
+.source-input button { white-space:nowrap }
+.source-hint { margin-top:7px; font-size:.84rem }
+.source-result { margin-top:15px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#ffffff05 }
+.source-result[data-kind="video"],.source-result[data-kind="catalog"] { border-color:#b8dcff37; background:#b8dcff0a }
+.source-result[data-kind="invalid"],.source-result[data-kind="unreachable"] { border-color:#ffadad33 }
+.source-result p { overflow-wrap:anywhere; margin-top:4px }
+.source-result p:empty { display:none }
+.source-result details { margin-top:12px }
+.source-result summary { cursor:pointer; color:var(--muted); width:max-content }
 .field-label { display:block; margin:12px 0 6px; color:#e4eaf7; font-size:.84rem; font-weight:620 }
 .field-label span { color:var(--muted); font-size:.72rem; font-weight:460 }
 .field-label > input { margin-top:6px }
 .import-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px }
-#link-form > .inline-error { margin-top:8px }
 .settings-section { padding:15px; border:1px solid var(--border); border-radius:13px; background:#ffffff04 }
 .settings-section + .settings-section { margin-top:12px }
 .settings-section > p { margin-top:6px }

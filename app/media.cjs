@@ -130,11 +130,12 @@ function openMedia(folder) {
       title:metadata.title?.trim() || local.title,imdb:metadata.imdb?.trim() || local.imdb},path.basename(filename,suffix))
   }
 
-  function addList(filename) {
+  function addList(filename,input) {
     if (fs.statSync(filename).size > 2*1024*1024) throw Error('Die Medienliste ist größer als 2 MB.')
-    let input
-    try { input=JSON.parse(fs.readFileSync(filename,'utf8').replace(/^\uFEFF/,'')) }
-    catch { throw Error('Die Medienliste ist kein gültiges JSON.') }
+    if (input===undefined) {
+      try { input=JSON.parse(fs.readFileSync(filename,'utf8').replace(/^\uFEFF/,'')) }
+      catch { throw Error('Die Medienliste ist kein gültiges JSON.') }
+    }
     if (typeof input?.id!=='string' || !/^[\w.-]{1,120}$/.test(input.id) ||
         typeof input.title!=='string' || !input.title.trim()) throw Error('Die Medienliste braucht id und title.')
     const folder = path.dirname(fs.realpathSync(filename))

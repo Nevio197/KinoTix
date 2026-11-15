@@ -7,6 +7,7 @@ const { openMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
+const { checkSource } = require('./source-check.cjs')
 const { createUpdater } = require('./public-updater.cjs')
 const { autoSkip, destination, markerService, readSegments, segmentKey, timelineSegments } = require('./segments.js')
 const { controller, keyAction, fallbackVariant } = require('./playback-controls.cjs')
@@ -57,6 +58,44 @@ function makeCatalogView(partition,topHosts,resourceHosts) {
 }
 const catalogOptions={makeView:makeCatalogView,fetcher:(url,options)=>net.fetch(url,options)}
 const getTitle=url=>decodeTitle(url)?catalog.detail(url):media.detail(url)
+const inspectSource=(url,target)=>checkSource(url,{
+  fetcher:catalogOptions.fetcher,
+  verifyCatalog:source=>target.check(source),
+})
+
+function rememberMedia(item) {
+  applyProgress(item.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
+  return {kind:'video',item}
+}
+
+async function chooseSourceFile(payload) {
+  const target=catalog
+  const result=await dialog.showOpenDialog(win,{properties:['openFile'],filters:[
+    {name:'Videos, Medienlisten und Kataloge',extensions:[...formats].map(value=>value.slice(1)).concat('json')}]})
+  if (result.canceled) return null
+  if (target!==catalog) throw Error('Das Konto hat sich geändert. Wähle die Datei erneut.')
+  const filename=result.filePaths[0]
+  if (path.extname(filename).toLowerCase()!=='.json') return rememberMedia(media.addFile(filename,payload))
+
+  const entry=fs.statSync(filename)
+  if (!entry.isFile() || entry.size>2*1024*1024) throw Error('Wähle eine JSON-Datei bis 2 MB.')
+  let data
+  try { data=JSON.parse(fs.readFileSync(filename,'utf8').replace(/^\uFEFF/,'')) }
+  catch { throw Error('Die Datei enthält kein gültiges JSON.') }
+  const object=data && typeof data==='object' && !Array.isArray(data)
+  const mediaList=object && (Object.hasOwn(data,'title') || Object.hasOwn(data,'episodes') || Object.hasOwn(data,'sources'))
+  const catalogFile=object && (Object.hasOwn(data,'listing') || Object.hasOwn(data,'detail') ||
+    (!mediaList && Object.hasOwn(data,'origin')))
+  if (catalogFile) {
+    if (entry.size>65536) throw Error('Die Katalogdatei darf höchstens 64 KB groß sein.')
+    sync.recordCatalog(target.importSource(data,{allowOriginChange:true}))
+    return {kind:'catalog'}
+  }
+  if (!mediaList) {
+    throw Error('Die Datei enthält weder einen KinoTix-Katalog noch eine Medienliste.')
+  }
+  return rememberMedia(media.addList(filename,data))
+}
 
 function stop(leaveFullscreen = true) {
   clearInterval(timer)
@@ -401,6 +440,22 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (action === 'sync-sign-in') { await closePlayback(); return sync.signIn() }
   if (action === 'sync-sign-out') { await closePlayback(); return sync.signOut() }
   if (action === 'sync-refresh') { await sync.exchange(); return sync.status() }
+  if (action === 'source-preview') {
+    const {source,...result}=await inspectSource(payload.url,catalog)
+    return result
+  }
+  if (action === 'source-add') {
+    const target=catalog
+    const result=await inspectSource(payload.url,target)
+    if (target!==catalog) throw Error('Das Konto hat sich geändert. Prüfe die Adresse erneut.')
+    if (result.kind==='video') return rememberMedia(media.addURL(result.url,payload))
+    if (result.kind==='catalog') {
+      sync.recordCatalog(target.importSource(result.source))
+      return {kind:'catalog'}
+    }
+    throw Error(result.message)
+  }
+  if (action === 'source-file') return chooseSourceFile(payload)
   if (action === 'catalog-home') return catalog.home()
   if (action === 'catalog-state') return {sources:catalog.list(),available:catalog!==deviceCatalog && deviceCatalog.list().length>0}
   if (action === 'catalog-import') {

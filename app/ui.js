@@ -135,9 +135,9 @@ function feature(item, episode = null) {
 function emptyLibrary() {
   const hero = make('section','','hero')
   const body = make('div','','hero-content')
-  body.append(make('h1','Deine Mediathek'),make('p','Füge ein Video, eine Medienliste oder einen eigenen Katalog hinzu.','lead'))
+  body.append(make('h1','Deine Mediathek'),make('p','Füge eine Quelle per Webadresse oder Datei hinzu.','lead'))
   const controls = make('div','','actions')
-  controls.append(iconAction('plus','Medium hinzufügen',()=>openImport(),'primary'))
+  controls.append(iconAction('plus','Quelle hinzufügen',()=>openImport(),'primary'))
   body.append(controls)
   hero.append(body)
   return hero
@@ -146,9 +146,8 @@ function importShelf() {
   const section = make('section','','import-shelf')
   const grid = make('div','','import-cards')
   const choices = [
-    ['file','Datei oder Liste','Video oder JSON-Medienliste vom Gerät',()=>{openImport();return addMedia(true)}],
-    ['link','Videolink','Direkte HTTPS-Adresse eines Videos',openImport],
-    ['grid','Katalog','Eigene Medienquelle per Katalogdatei',showCatalogs],
+    ['link','Webadresse einfügen','Video oder KinoTix-Katalog',openImport],
+    ['file','Datei auswählen','Video, Medienliste oder Katalogdatei',()=>{openImport();return chooseSourceFile()}],
   ]
   for (const [name,title,description,open] of choices) {
     const button = action('',open,'import-card')
@@ -159,7 +158,7 @@ function importShelf() {
     button.append(symbol,label,icon('chevron'))
     grid.append(button)
   }
-  section.append(make('h2','Medien hinzufügen','section-title'),grid)
+  section.append(make('h2','Quellen hinzufügen','section-title'),grid)
   return section
 }
 function group(title, items, callback, isHistory = false) {
@@ -269,7 +268,11 @@ async function showHome(newPage = 1) {
   if (!resume && !local.items.length && firstTitle) main.prepend(feature(firstTitle))
   for (const source of sources) {
     if (source.items.length) main.append(group(source.name,source.items,item=>openTitle(item)))
-    else if (source.issue) main.append(notice(source.name,source.issue,()=>showHome(page)))
+    else if (source.issue) {
+      const issue = notice(source.name,source.issue,()=>showHome(page))
+      issue.querySelector('.actions').append(action('Andere Quelle hinzufügen',openImport))
+      main.append(issue)
+    }
   }
   catalog.hidden = !catalog.childElementCount
 }
@@ -385,7 +388,7 @@ async function showCatalogs() {
   view.append(action('Katalogdatei importieren',async()=>{
     if (await request('catalog-import')) { settings.close();await showHome() }
   },'primary'))
-  dialog('Kataloge',make('p','Eine Katalogdatei verbindet KinoTix mit einer von dir gewählten Medienquelle.'),view)
+  dialog('Kataloge',view)
 }
 
 async function showAccount() {
@@ -641,21 +644,84 @@ document.querySelector('#search').addEventListener('submit', event => {
 function openImport() {
   if (active) { void request('close'); active = null; void showHome() }
   linkDialog.showModal()
-  document.querySelector('#url').focus()
+  sourceURL.focus()
 }
 document.querySelector('#from-link').addEventListener('click',openImport)
 document.querySelector('#cancel-link').addEventListener('click', () => linkDialog.close())
-const addForm=document.querySelector('#link-form')
-async function addMedia(local) {
-  const feedback=addForm.querySelector('[role=status]')
-  try {
-    const item=await request('media-add',{local,url:addForm.elements.url.value.trim(),
-      title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
-    if (item) { linkDialog.close(); addForm.reset(); return await openTitle(item) }
-  } catch (error) { feedback.textContent=cleanError(error) }
+const addForm = document.querySelector('#link-form')
+const sourceURL = addForm.elements.url
+const sourceCheck = document.querySelector('#source-check')
+const sourceResult = document.querySelector('#source-result')
+const sourceDetails = document.querySelector('#source-details')
+const sourceActions = document.querySelector('#source-actions')
+const sourceSave = document.querySelector('#source-save')
+const sourceFile = document.querySelector('#file-open')
+let sourceRevision = 0
+let checkedSource
+
+function showSourceResult(kind, title, message) {
+  sourceResult.hidden = false
+  sourceResult.dataset.kind = kind
+  sourceResult.querySelector('#source-kind').textContent = title
+  sourceResult.querySelector('#source-message').textContent = message || ''
+  sourceActions.hidden = !checkedSource
+  sourceDetails.hidden = checkedSource?.kind !== 'video'
 }
-addForm.addEventListener('submit',event=>{event.preventDefault(); void addMedia(false)})
-document.querySelector('#file-open').addEventListener('click',()=>void addMedia(true))
+function resetSourcePreview() {
+  sourceRevision++
+  checkedSource = undefined
+  sourceResult.hidden = true
+  sourceCheck.disabled = false
+}
+function sourceFailure(error) {
+  checkedSource = undefined
+  showSourceResult('invalid','Quelle konnte nicht hinzugefügt werden',cleanError(error))
+}
+async function checkSource() {
+  const revision = ++sourceRevision
+  checkedSource = undefined
+  sourceCheck.disabled = true
+  showSourceResult('checking','Adresse wird geprüft')
+  try {
+    const result = await request('source-preview',{url:sourceURL.value.trim()})
+    if (revision !== sourceRevision || !linkDialog.open) return
+    if (result.kind === 'video' || result.kind === 'catalog') checkedSource = result
+    const titles = {
+      video:'Video erkannt',catalog:result.name || 'KinoTix-Katalog erkannt',
+      website:'Webseite erkannt',unreachable:'Quelle nicht erreichbar',invalid:'Adresse prüfen',
+    }
+    showSourceResult(result.kind,titles[result.kind],result.message)
+    if (checkedSource) sourceSave.focus()
+  } catch (error) {
+    if (revision === sourceRevision) sourceFailure(error)
+  } finally {
+    if (revision === sourceRevision) sourceCheck.disabled = false
+  }
+}
+async function addSource(method, value) {
+  if (sourceFile.disabled) return
+  sourceFile.disabled = sourceCheck.disabled = sourceSave.disabled = sourceURL.disabled = true
+  try {
+    const result = await request(method,value)
+    if (!result) return
+    linkDialog.close()
+    addForm.reset()
+    if (result.kind === 'video') await openTitle(result.item)
+    else await showHome()
+  } catch (error) {
+    if (linkDialog.open) sourceFailure(error)
+  } finally {
+    sourceFile.disabled = sourceCheck.disabled = sourceSave.disabled = sourceURL.disabled = false
+  }
+}
+function chooseSourceFile() { return addSource('source-file',{}) }
+addForm.addEventListener('submit',event=>{event.preventDefault(); void checkSource()})
+sourceURL.addEventListener('input',resetSourcePreview)
+sourceFile.addEventListener('click',()=>void chooseSourceFile())
+sourceSave.addEventListener('click',()=>{
+  if (checkedSource) void addSource('source-add',{url:checkedSource.url,title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
+})
+linkDialog.addEventListener('close',resetSourcePreview)
 document.querySelector('#catalog-open').addEventListener('click',()=>{
   linkDialog.close()
   void showCatalogs().catch(error=>dialog('Kataloge',make('p',cleanError(error))))

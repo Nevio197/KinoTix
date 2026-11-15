@@ -1,6 +1,6 @@
 # <img src="app/art/mark.png" width="38" height="38" alt=""> KinoTix
 
-Desktop-Videoplayer für Windows x64 und macOS. Füge unter **Medium hinzufügen** eigene Videodateien, freigegebene direkte HTTPS-Videolinks oder eine [JSON-Medienliste](examples/medienliste.json) hinzu.
+Desktop-Videoplayer für Windows x64 und macOS. Unter **Hinzufügen** kannst du eine Webadresse prüfen oder eine Datei auswählen. KinoTix erkennt unterstützte Videolinks, [Medienlisten](examples/medienliste.json) und [Kataloge](docs/KATALOGE.md). Die Mediathek ist auch im Gastmodus verfügbar.
 
 **[KinoTix für Windows herunterladen](https://github.com/Nevio197/KinoTix/releases/latest)**. Installiere den GitHub-Build einmal, um automatische Updates einzuschalten. Für macOS stehen der native Gerätetest und das signierte Release aus.
 

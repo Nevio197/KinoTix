@@ -38,7 +38,7 @@ Zu `Beispiel.mp4` kannst du eine Datei `Beispiel.kinotix.json` im selben Ordner 
 }
 ```
 
-[Beispiel einer Medienliste](../examples/medienliste.json) mit mehreren Folgen und Videoqualitäten. Die Liste über **Medium hinzufügen → Datei oder Liste wählen** importieren. Relative Dateinamen verweisen auf Dateien im Ordner der Liste. Eine freigegebene direkte HTTPS-Quelle kann als `url` statt `file` angegeben werden. `id` identifiziert die Liste auf beiden Rechnern und sollte beim Ändern der Pfade oder Varianten gleich bleiben.
+[Beispiel einer Medienliste](../examples/medienliste.json) mit mehreren Folgen und Videoqualitäten. Die Liste über **Hinzufügen → Datei auswählen** importieren. Relative Dateinamen verweisen auf Dateien im Ordner der Liste. Eine freigegebene direkte HTTPS-Quelle kann als `url` statt `file` angegeben werden. `id` identifiziert die Liste auf beiden Rechnern und sollte beim Ändern der Pfade oder Varianten gleich bleiben.
 
 ## Nächster Schritt für größere Bibliotheken
 

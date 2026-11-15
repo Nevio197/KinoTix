@@ -40,7 +40,7 @@
       <button type="submit" class="sr-only">Suchen</button>
     </form>
     <div class="header-actions">
-      <button id="from-link" class="header-add" title="Medium hinzufügen"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>Hinzufügen</span></button>
+      <button id="from-link" class="header-add" title="Quelle hinzufügen"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>Hinzufügen</span></button>
       <button id="account" class="icon-button" aria-label="Google-Konto" title="Google-Konto"><svg class="icon" aria-hidden="true"><use href="#icon-cloud"></use></svg></button>
       <button id="app-settings" class="icon-button" aria-label="Einstellungen" title="Einstellungen"><svg class="icon" aria-hidden="true"><use href="#icon-settings"></use></svg></button>
       <button id="profile" class="profile-button" aria-label="Mein Profil" title="Profile"><span class="profile-avatar" aria-hidden="true">M</span><span class="profile-name">Mein Profil</span></button>
@@ -52,21 +52,35 @@
 <dialog id="link-dialog" aria-labelledby="import-title">
   <form id="link-form">
     <div class="dialog-header">
-      <h2 id="import-title">Medium hinzufügen</h2>
+      <h2 id="import-title">Quelle hinzufügen</h2>
       <button type="button" id="cancel-link" class="icon-button" aria-label="Schließen"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button>
     </div>
+    <label class="field-label" for="url">Webadresse</label>
+    <div class="source-input">
+      <input type="text" inputmode="url" name="url" id="url" placeholder="Adresse einfügen" autocomplete="off" spellcheck="false" aria-describedby="source-hint" required>
+      <button type="submit" id="source-check" class="primary">Adresse prüfen</button>
+    </div>
+    <p id="source-hint" class="source-hint">Link zu einem Video oder zu einem KinoTix-Katalog.</p>
+    <div id="source-result" class="source-result" hidden>
+      <div role="status">
+        <strong id="source-kind"></strong>
+        <p id="source-message"></p>
+      </div>
+      <details id="source-details" hidden>
+        <summary>Videodetails ergänzen</summary>
+        <div class="import-fields">
+          <label class="field-label">Titel <span>optional</span><input type="text" name="title" maxlength="150"></label>
+          <label class="field-label">IMDb-ID <span>für Zeitmarken</span><input type="text" name="imdb" placeholder="tt1234567" maxlength="14"></label>
+        </div>
+      </details>
+      <div class="actions" id="source-actions" hidden>
+        <button type="button" id="source-save" class="primary">In Mediathek übernehmen</button>
+      </div>
+    </div>
     <div class="import-options">
-      <button type="button" id="file-open"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>Datei oder Liste wählen</button>
-      <button type="button" id="catalog-open"><svg class="icon" aria-hidden="true"><use href="#icon-grid"></use></svg>Katalog hinzufügen</button>
+      <button type="button" id="file-open"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>Datei auswählen</button>
+      <button type="button" id="catalog-open"><svg class="icon" aria-hidden="true"><use href="#icon-grid"></use></svg>Kataloge verwalten</button>
     </div>
-    <label class="field-label" for="url">Direkter HTTPS-Videolink</label>
-    <input type="url" name="url" id="url" placeholder="https://…/video.mp4" required>
-    <div class="import-fields">
-      <label class="field-label">Titel <span>optional</span><input type="text" name="title" maxlength="150"></label>
-      <label class="field-label">IMDb-ID <span>für Zeitmarken</span><input type="text" name="imdb" placeholder="tt1234567" maxlength="14"></label>
-    </div>
-    <p class="inline-error" role="status"></p>
-    <div class="actions"><button type="submit" class="primary">Link hinzufügen</button></div>
   </form>
 </dialog>
 </body>

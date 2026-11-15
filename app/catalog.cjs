@@ -3,12 +3,16 @@ const path=require('node:path')
 const {createHash}=require('node:crypto')
 const {setTimeout:delay}=require('node:timers/promises')
 const {https,config,decodeTitle,titleID,episodeID,catalogRecord}=require('./catalog-format.cjs')
+const {blockedHost,networkIssue,httpIssue}=require('./source-check.cjs')
 
 const reader=fs.readFileSync(path.join(__dirname,'catalog-reader.js'),'utf8')
 const reliableID=value=>typeof value==='string' && /^tt\d{7,12}$/.test(value)?value:undefined
 const clean=(value,max)=>typeof value==='string'?value.trim().slice(0,max):''
 const normalize=value=>value.toLocaleLowerCase('de-DE').normalize('NFD').replace(/\p{Diacritic}/gu,'')
 
+function sourceError(code,message) {
+  return Object.assign(new Error(message),{code})
+}
 function safeURL(value,hosts) {
   try {
     const url=https(value)
@@ -28,7 +32,7 @@ function cleanRow(raw,source) {
     provider:source.name,isSeries:raw.isSeries===true || Boolean(source.detail.seriesPrefix && url.pathname.startsWith(source.detail.seriesPrefix))}
 }
 
-function openCatalog(folder,{makeView,fetcher=fetch}) {
+function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost}) {
   const filename=path.join(folder,'catalogs.json')
   const records=new Map()
   try {
@@ -76,41 +80,63 @@ function openCatalog(folder,{makeView,fetcher=fetch}) {
     catch { throw Error('Die Katalogdatei ist kein gültiges JSON.') }
     return update(config(input))
   }
+  function importSource(value,{allowOriginChange=false}={}) {
+    const source = config(value)
+    const existing = findSource(source.id)
+    if (existing && existing.origin !== source.origin && !allowOriginChange) {
+      throw Error('Ein anderer Katalog verwendet diese Kennung bereits.')
+    }
+    return update(source)
+  }
 
   async function read(source,address,rules,accept) {
     const url=safeURL(address)
     if (!url) throw Error('Die Quelle hat eine ungültige Adresse.')
+    if (rules.listing && await detectBlock(url.hostname)) {
+      throw sourceError('blocked','Diese Adresse wird in deinem Netz auf eine Sperrseite umgeleitet.')
+    }
     const mainHosts=rules.player?[...source.playerHosts,...source.mediaHosts]:
       [new URL(source.origin).hostname,...source.catalogHosts]
     const allowed=[...mainHosts,...source.resourceHosts]
     const signature=createHash('sha256').update(JSON.stringify(allowed)).digest('hex').slice(0,12)
     const contents=makeView('kinotix-catalog-'+source.id+'-'+signature,mainHosts,allowed)
-    let expired=false
+    const navigation=new AbortController()
     let timeout
-    const stop=new Promise((_,reject)=>{timeout=setTimeout(()=>{expired=true;reject(Error('Die Quelle antwortet zu langsam.'))},10500)})
+    const stop=new Promise((_,reject)=>{
+      const fail=({code,message})=>{ if (!navigation.signal.aborted) reject(sourceError(code,message)) }
+      timeout=setTimeout(()=>fail({code:'timeout',message:'Die Quelle antwortet zu langsam. Versuche es gleich noch einmal.'}),10500)
+      contents.on('did-navigate',(_event,_target,status)=>{
+        if (status>=400) fail(httpIssue(status))
+      })
+      void contents.loadURL(url.href).catch(async error=>{
+        if (!navigation.signal.aborted) fail(await networkIssue(error,url,rules.listing?()=>false:detectBlock))
+      })
+    })
     const run=(async()=>{
-      void contents.loadURL(url.href).catch(()=>{})
       const script=reader+'('+JSON.stringify(rules)+')'
-      for (let attempt=0;attempt<18 && !expired && !contents.isDestroyed();attempt++) {
+      for (let attempt=0;attempt<18 && !navigation.signal.aborted && !contents.isDestroyed();attempt++) {
         const value=await contents.executeJavaScriptInIsolatedWorld(1001,[{code:script}]).catch(()=>null)
         if (accept(value) && safeURL(contents.getURL(),mainHosts)) return value
         await delay(500)
       }
-      throw Error('Die Quelle hat keine passenden Katalogdaten geliefert.')
+      throw sourceError('incompatible','Die Webseite liefert keine passenden Katalogdaten. Prüfe, ob die Katalogdatei aktuell ist.')
     })()
     try { return await Promise.race([run,stop]) }
-    finally { clearTimeout(timeout); if (!contents.isDestroyed()) contents.close() }
+    finally { navigation.abort(); clearTimeout(timeout); if (!contents.isDestroyed()) contents.close() }
   }
-  async function homeOne(source) {
-    const cached=listing.get(source.id)
-    if (cached && cached.until>Date.now()) return cached.items
+  async function loadListing(source) {
     const response=await read(source,source.origin,{listing:source.listing},value=>value?.ready && Array.isArray(value.items))
     const seen=new Map()
     for (const raw of response.items.slice(0,200)) {
       const item=cleanRow(raw,source)
       if (item && !seen.has(item.url)) seen.set(item.url,item)
     }
-    const items=[...seen.values()]
+    return [...seen.values()]
+  }
+  async function homeOne(source) {
+    const cached=listing.get(source.id)
+    if (cached && cached.until>Date.now()) return cached.items
+    const items=await loadListing(source)
     listing.set(source.id,{until:Date.now()+120000,items})
     return items
   }
@@ -203,7 +229,8 @@ function openCatalog(folder,{makeView,fetcher=fetch}) {
     return result
   }
   return {
-    records:()=>[...records.values()],apply,importFile,
+    records:()=>[...records.values()],apply,importFile,importSource,
+    async check(source) { return (await loadListing(config(source))).length },
     remove(id) {
       if (!findSource(id)) throw Error('Der Katalog ist nicht vorhanden.')
       return update(null,id)
@@ -212,7 +239,7 @@ function openCatalog(folder,{makeView,fetcher=fetch}) {
     async home() {
       return Promise.all(visible().map(async source=>{
         try { return {name:source.name,items:await homeOne(source)} }
-        catch (e) { return {name:source.name,items:[],issue:e.message} }
+        catch (e) { return {name:source.name,items:[],issue:e.message,issueCode:e.code} }
       }))
     },
     async search(query) {

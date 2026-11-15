@@ -121,6 +121,31 @@ jobs:
             : "${APPLE_ID:?Missing Apple ID}" "${APPLE_APP_SPECIFIC_PASSWORD:?Missing notarization credential}" "${APPLE_TEAM_ID:?Missing Apple Team ID}"
           fi
           npm run ${{ matrix.script }} --prefix windows
+      - name: Verify macOS universal app and update assets
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          app=dist/mac-universal/KinoTix.app
+          artifact="KinoTix-$version-macOS-universal"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = 'de.kinotix.desktop'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version"
+          architectures="$(xcrun lipo -archs "$app/Contents/MacOS/KinoTix")"
+          for arch in arm64 x86_64; do [[ " $architectures " == *" $arch "* ]]; done
+          codesign --verify --deep --strict "$app"
+          signature="$(codesign --display --verbose=4 "$app" 2>&1)"
+          grep -q '^Authority=Developer ID Application:' <<< "$signature"
+          grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+          xcrun stapler validate "$app"
+          test -s "$app/Contents/Resources/app-update.yml"
+          hdiutil verify "dist/$artifact.dmg"
+          test -s "dist/$artifact.zip.blockmap"
+          grep -Fq "url: $artifact.zip" dist/latest-mac.yml
+          zip_digest="$(openssl dgst -sha512 -binary "dist/$artifact.zip" | openssl base64 -A)"
+          grep -Fq "sha512: $zip_digest" dist/latest-mac.yml
       - name: Verify signed Windows build
         if: runner.os == 'Windows' && env.WINDOWS_AUTHENTICODE == 'true'
         shell: pwsh
@@ -192,6 +217,7 @@ jobs:
             files+=(
               "dist/KinoTix-$version-macOS-universal.dmg"
               "dist/KinoTix-$version-macOS-universal.zip"
+              "dist/KinoTix-$version-macOS-universal.zip.blockmap"
               dist/latest-mac.yml
             )
           fi

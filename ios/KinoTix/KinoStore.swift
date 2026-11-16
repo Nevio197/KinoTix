@@ -16,6 +16,7 @@ final class KinoStore: ObservableObject {
     @Published private(set) var status: String?
     @Published private(set) var isBusy = false
     @Published private(set) var playback: KinoPlayback?
+    @Published private(set) var coverScope = UUID()
 
     private struct Library: Codable {
         var rows: [String: KinoSyncRow] = [:]
@@ -44,6 +45,8 @@ final class KinoStore: ObservableObject {
     private var confirmingSignIn = false
     private var sceneIsActive = false
     private var playRequest = UUID()
+    private var coverTasks: [String: Task<Void, Never>] = [:]
+    private var coverRetryAfter: [String: Date] = [:]
 
     init() {
         folder = URL.applicationSupportDirectory.appending(path: "KinoTix", directoryHint: .isDirectory)
@@ -242,7 +245,43 @@ final class KinoStore: ObservableObject {
             for title in result where seen.insert(title.id).inserted { found.append(title) }
         }
         guard catalogs == snapshot, !Task.isCancelled else { return [] }
-        return Array(found.prefix(100))
+        return found.prefix(100).map(withKnownCover)
+    }
+
+    func poster(for title: KinoTitle) -> URL? {
+        title.poster ?? library.observedTitles[title.id]?.poster ?? library.favorites[title.id]?.poster
+    }
+
+    func loadCover(for title: KinoTitle) async {
+        guard let catalogID = title.catalogID else { return }
+        let scope = coverScope
+        while !Task.isCancelled, scope == coverScope, poster(for: title) == nil,
+              coverTasks[title.id] == nil, (coverRetryAfter[title.id] ?? .distantPast) <= .now,
+              let catalog = catalogs.first(where: { $0.id == catalogID }) {
+            if coverTasks.count >= 4, let pending = coverTasks.values.first {
+                await pending.value
+                continue
+            }
+            let task = Task { [weak self, client] in
+                let result = try? await client.cover(title, in: catalog)
+                guard let self, coverScope == scope else { return }
+                coverTasks[title.id] = nil
+                guard !Task.isCancelled, catalogs.contains(catalog) else { return }
+                if let url = result {
+                    let known = library.observedTitles[title.id] ?? title
+                    if poster(for: known) == nil {
+                        library.observedTitles[title.id] = replacingPoster(of: known, with: url)
+                        save()
+                        rebuild()
+                    }
+                } else {
+                    coverRetryAfter[title.id] = Date.now.addingTimeInterval(120)
+                }
+            }
+            coverTasks[title.id] = task
+            await task.value
+            return
+        }
     }
 
     func detail(_ title: KinoTitle) async throws -> KinoDetail {
@@ -252,10 +291,14 @@ final class KinoStore: ObservableObject {
             }
             let scope = owner?.id
             let result = try await client.detail(title, in: catalog)
-            guard scope == owner?.id else { throw CancellationError() }
-            library.observedTitles[title.id] = result.title
-            save()
-            return result
+            guard scope == owner?.id, catalogs.contains(catalog) else { throw CancellationError() }
+            let observed = withKnownCover(result.title)
+            if library.observedTitles[title.id] != observed {
+                library.observedTitles[title.id] = observed
+                save()
+                rebuild()
+            }
+            return KinoDetail(title: observed, description: result.description, episodes: result.episodes)
         }
         guard let url = title.url else { throw KinoStoreError("Der Titel hat keine Videoadresse.") }
         return KinoDetail(title: title, description: "", episodes: [
@@ -316,7 +359,7 @@ final class KinoStore: ObservableObject {
             episode: current.episode.number, isSeries: current.title.isSeries
         )
         let share = reference != nil || current.title.url.map(KinoAddress.shareable) == true
-        library.observedTitles[current.title.id] = current.title
+        library.observedTitles[current.title.id] = withKnownCover(current.title)
         store("progress", current.episode.id,
               KinoSyncValue(time: min(seconds, duration), duration: duration, finished: finished, catalog: reference),
               share: share)
@@ -394,7 +437,7 @@ final class KinoStore: ObservableObject {
     }
 
     func toggleFavorite(_ title: KinoTitle) {
-        if library.favorites.removeValue(forKey: title.id) == nil { library.favorites[title.id] = title }
+        if library.favorites.removeValue(forKey: title.id) == nil { library.favorites[title.id] = withKnownCover(title) }
         save()
         rebuild()
     }
@@ -454,6 +497,10 @@ final class KinoStore: ObservableObject {
         pendingSync = nil
         playback = nil
         homeTitles = []
+        coverScope = UUID()
+        for task in coverTasks.values { task.cancel() }
+        coverTasks.removeAll()
+        coverRetryAfter.removeAll()
         owner = identity
         accountEmail = identity?.email
         library = (try? JSONDecoder().decode(Library.self, from: Data(contentsOf: file()))) ?? Library()
@@ -486,9 +533,12 @@ final class KinoStore: ObservableObject {
         var order = Array(library.localItems.keys.sorted())
         for item in direct + homeTitles.filter({ $0.catalogID.map(ids.contains) == true }) {
             if byID[item.id] == nil { order.append(item.id) }
-            byID[item.id] = item
+            byID[item.id] = withKnownCover(item)
         }
-        let visibleFavorites = library.favorites.values.filter { $0.catalogID.map(ids.contains) ?? true }
+        let visibleFavorites = library.favorites.values.filter { $0.catalogID.map(ids.contains) ?? true }.map { title in
+            if let cover = byID[title.id]?.poster { return replacingPoster(of: title, with: cover) }
+            return withKnownCover(title)
+        }
         favoriteTitles = visibleFavorites.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         favorites = Set(favoriteTitles.map(\.id))
         titles = order.compactMap { byID[$0] }
@@ -503,9 +553,9 @@ final class KinoStore: ObservableObject {
                    let catalog = catalogs.first(where: { reference.url.hasPrefix("catalog:" + $0.id + ":") }),
                    let path = KinoAddress.catalogPath(reference.url, for: catalog),
                    let url = URL(string: path, relativeTo: catalog.origin)?.absoluteURL {
-                    let title = byID[reference.url] ?? library.observedTitles[reference.url]
+                    let title = withKnownCover(byID[reference.url] ?? library.observedTitles[reference.url]
                         ?? KinoTitle(id: reference.url, name: reference.title, poster: nil, provider: catalog.name,
-                                     isSeries: reference.isSeries, catalogID: catalog.id, url: url)
+                                     isSeries: reference.isSeries, catalogID: catalog.id, url: url))
                     guard resumedTitles.insert(title.id).inserted else { return nil }
                     return KinoResume(id: row.itemID, title: title, season: reference.season,
                                       episode: reference.episode, seconds: seconds)
@@ -513,6 +563,16 @@ final class KinoStore: ObservableObject {
                 guard let title = byID[row.itemID], resumedTitles.insert(title.id).inserted else { return nil }
                 return KinoResume(id: row.itemID, title: title, season: 1, episode: 1, seconds: seconds)
             }
+    }
+
+    private func withKnownCover(_ title: KinoTitle) -> KinoTitle {
+        guard title.poster == nil, let poster = poster(for: title) else { return title }
+        return replacingPoster(of: title, with: poster)
+    }
+
+    private func replacingPoster(of title: KinoTitle, with url: URL) -> KinoTitle {
+        KinoTitle(id: title.id, name: title.name, poster: url, provider: title.provider,
+                  isSeries: title.isSeries, catalogID: title.catalogID, url: title.url)
     }
 
     private func mediaTitle(_ url: URL, name: String?) -> KinoTitle {

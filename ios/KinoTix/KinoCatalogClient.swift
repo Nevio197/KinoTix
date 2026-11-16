@@ -27,6 +27,7 @@ actor KinoCatalogClient {
         var titles: [KinoTitle] = []
         var seen = Set<String>()
         let available = Self.catalogHosts(catalog)
+        let covers = available.union(catalog.resourceHosts).union(catalog.mediaHosts)
         for row in entries.prefix(200) {
             let rawAddress = try row.attr("href")
             guard let address = Self.resolve(rawAddress, relativeTo: reply.url, hosts: available) else { continue }
@@ -35,7 +36,8 @@ actor KinoCatalogClient {
             if name.isEmpty { name = try row.attr("title") }
             if name.isEmpty { name = try image?.attr("alt") ?? "" }
             guard let title = Self.title(name: name, address: address,
-                                         poster: Self.poster(image, relativeTo: reply.url, catalog: catalog),
+                                         poster: Self.listingPoster(row, name: name, address: address,
+                                                                    relativeTo: reply.url, hosts: covers),
                                          catalog: catalog), seen.insert(title.id).inserted else { continue }
             titles.append(title)
         }
@@ -92,6 +94,18 @@ actor KinoCatalogClient {
         return Array(matches.prefix(80))
     }
 
+    func cover(_ title: KinoTitle, in catalog: KinoCatalog) async throws -> URL? {
+        _ = try Self.validate(catalog)
+        let hosts = Self.catalogHosts(catalog)
+        guard title.catalogID == catalog.id, let address = title.url,
+              Self.belongs(address, to: hosts) else { throw CatalogError.invalidAddress }
+        let coverHosts = hosts.union(catalog.resourceHosts).union(catalog.mediaHosts)
+        if let url = title.poster, Self.belongs(url, to: coverHosts) { return url }
+        guard catalog.detail["poster"] != nil else { return nil }
+        let reply = try await fetch(address, hosts: hosts, limit: 2_097_152)
+        return try Self.detailPoster(SwiftSoup.parse(reply.text), relativeTo: reply.url, catalog: catalog)
+    }
+
     func detail(_ title: KinoTitle, in catalog: KinoCatalog) async throws -> KinoDetail {
         _ = try Self.validate(catalog)
         guard title.catalogID == catalog.id, let address = title.url,
@@ -102,7 +116,7 @@ actor KinoCatalogClient {
         let name = try document.select(rules["title"] ?? "").first()?.text() ?? ""
         guard !name.isEmpty else { throw CatalogError.invalidTitle }
         let description = try rules["description"].flatMap { try document.select($0).first()?.text() } ?? ""
-        let photo = try rules["poster"].flatMap { try document.select($0).first() }
+        let photo = try Self.detailPoster(document, relativeTo: reply.url, catalog: catalog)
         let allowed = Set(catalog.playerHosts + catalog.mediaHosts)
         let embed = Self.regularExpression(rules["embedPattern"], captures: 1)
         let extractionDeadline = Date().addingTimeInterval(0.6)
@@ -164,7 +178,7 @@ actor KinoCatalogClient {
                         season: key.season, number: key.number, links: episodes[key] ?? [])
         }
         let resolved = KinoTitle(id: title.id, name: String(name.prefix(180)),
-                                 poster: Self.poster(photo, relativeTo: reply.url, catalog: catalog) ?? title.poster,
+                                 poster: photo ?? title.poster,
                                  provider: catalog.name, isSeries: title.isSeries || items.count > 1,
                                  catalogID: catalog.id, url: address)
         return KinoDetail(title: resolved, description: String(description.prefix(600)), episodes: items)
@@ -265,7 +279,8 @@ actor KinoCatalogClient {
         guard Self.belongs(url, to: hosts) else { throw CatalogError.invalidAddress }
         var request = URLRequest(url: url)
         request.setValue(accept, forHTTPHeaderField: "Accept")
-        request.setValue("KinoTix iPhone", forHTTPHeaderField: "User-Agent")
+        // The shared catalog selectors describe the standard HTML layout.
+        request.setValue("KinoTix", forHTTPHeaderField: "User-Agent")
         let delegate = RedirectPolicy(hosts: hosts, redirects: redirects)
         let (bytes, response) = try await session.bytes(for: request, delegate: delegate)
         guard let http = response as? HTTPURLResponse, let final = http.url, Self.belongs(final, to: hosts) else {
@@ -376,13 +391,72 @@ actor KinoCatalogClient {
                          catalogID: catalog.id, url: canonical)
     }
 
-    private static func poster(_ image: Element?, relativeTo base: URL, catalog: KinoCatalog) -> URL? {
-        guard let image else { return nil }
-        let allowed = catalogHosts(catalog).union(catalog.resourceHosts).union(catalog.mediaHosts)
-        for key in ["data-src", "data-lazy-src", "data-original", "src"] {
-            if let value = try? image.attr(key), let url = resolve(value, relativeTo: base, hosts: allowed) {
-                return url
+    private static func detailPoster(_ document: Document, relativeTo base: URL, catalog: KinoCatalog) throws -> URL? {
+        guard let selector = catalog.detail["poster"], let element = try document.select(selector).first() else { return nil }
+        let hosts = catalogHosts(catalog).union(catalog.resourceHosts).union(catalog.mediaHosts)
+        if let url = posterURL(element, relativeTo: base, hosts: hosts) { return url }
+        return try element.select("img").first().flatMap { posterURL($0, relativeTo: base, hosts: hosts) }
+    }
+
+    private static func listingPoster(_ row: Element, name: String, address: URL,
+                                      relativeTo base: URL, hosts: Set<String>) -> URL? {
+        var card = row
+        var outer: Element? = row
+        while let element = outer {
+            if element.tagNameNormal() == "article" || element.hasClass("short") {
+                card = element
+                break
             }
+            outer = element.parent()
+        }
+        guard let images = try? card.select("img").array() else { return nil }
+        let nameKey = normalizedPosterTitle(name)
+        var best: URL?
+        var bestScore = -1
+        for image in images.prefix(24) {
+            guard let url = posterURL(image, relativeTo: base, hosts: hosts) else { continue }
+            let matchesTitle = !nameKey.isEmpty && normalizedPosterTitle((try? image.attr("alt")) ?? "") == nameKey
+            var matchesLink = false
+            var parent = image.parent()
+            while let element = parent {
+                if element.tagNameNormal() == "a", let href = try? element.attr("href"), !href.isEmpty {
+                    matchesLink = URL(string: href, relativeTo: base)?.absoluteURL == address
+                    break
+                }
+                parent = element.parent()
+            }
+            let width = Int((try? image.attr("width")) ?? "") ?? 0
+            let height = Int((try? image.attr("height")) ?? "") ?? 0
+            let displayed = (try? image.attr("src")).flatMap { resolve($0, relativeTo: base, hosts: hosts) } == url
+            if displayed, !matchesTitle, !matchesLink, width > 0, height > 0, max(width, height) < 64 { continue }
+            let score = (matchesTitle ? 8 : 0) + (matchesLink ? 4 : 0)
+                + (width > 0 && height > width ? 2 : 0) + (max(width, height) >= 110 ? 1 : 0)
+            if score > bestScore {
+                best = url
+                bestScore = score
+            }
+        }
+        return best
+    }
+
+    private static func normalizedPosterTitle(_ value: String) -> String {
+        value.precomposedStringWithCompatibilityMapping
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    private static let decorativeImage = try? NSRegularExpression(
+        pattern: #"(^|[_.-])(logo|icon|placeholder|spacer|blank|spinner|no[-_]?image)([_.-]|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func posterURL(_ image: Element, relativeTo base: URL, hosts: Set<String>) -> URL? {
+        for key in ["data-src", "data-lazy-src", "data-original", "src"] {
+            guard let value = try? image.attr(key), let url = resolve(value, relativeTo: base, hosts: hosts) else { continue }
+            let filename = url.lastPathComponent
+            guard decorativeImage?.firstMatch(in: filename, range: NSRange(filename.startIndex..., in: filename)) == nil else { continue }
+            return url
         }
         return nil
     }

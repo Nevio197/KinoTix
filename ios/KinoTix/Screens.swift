@@ -73,9 +73,9 @@ struct KinoTixRootView: View {
 
     private var home: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            LazyVStack(alignment: .leading, spacing: 24) {
                 if !store.continueWatching.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
                         Text("Weiterschauen").font(.title2.bold())
                         ForEach(store.continueWatching, id: \.id) { entry in
                             Button {
@@ -84,6 +84,7 @@ struct KinoTixRootView: View {
                                 KinoResumeRow(entry: entry)
                             }
                             .buttonStyle(.plain)
+                            .task(id: store.coverScope) { await store.loadCover(for: entry.title) }
                         }
                     }
                 }
@@ -102,7 +103,7 @@ struct KinoTixRootView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 13) {
                         Text("Mediathek").font(.title2.bold())
-                        KinoTitleGrid(titles: store.titles)
+                        KinoTitleGrid(titles: store.titles, store: store)
                     }
                 }
                 if let text = store.status, !text.isEmpty {
@@ -126,7 +127,7 @@ struct KinoTixRootView: View {
                     KinoEmptyView(title: "Deine Merkliste ist leer", icon: "bookmark",
                                   message: "Merke Filme oder Serien auf ihrer Titelseite.") { EmptyView() }
                 } else {
-                    KinoTitleGrid(titles: titles)
+                    KinoTitleGrid(titles: titles, store: store)
                 }
             }
             .padding(18)
@@ -155,7 +156,7 @@ private struct KinoSearchView: View {
                     KinoEmptyView(title: "Keine Treffer", icon: "magnifyingglass",
                                   message: "Versuche es mit einem anderen Suchbegriff.") { EmptyView() }
                 } else {
-                    KinoTitleGrid(titles: result)
+                    KinoTitleGrid(titles: result, store: store)
                 }
             }
             .padding(18)
@@ -354,6 +355,7 @@ private struct KinoDetailHeader: View {
 
 private struct KinoTitleGrid: View {
     let titles: [KinoTitle]
+    @ObservedObject var store: KinoStore
     private let columns = [GridItem(.adaptive(minimum: 130, maximum: 240), spacing: 12, alignment: .top)]
 
     var body: some View {
@@ -361,7 +363,7 @@ private struct KinoTitleGrid: View {
             ForEach(titles, id: \.id) { title in
                 NavigationLink(value: title) {
                     VStack(alignment: .leading, spacing: 0) {
-                        KinoCover(title: title)
+                        KinoCover(title: title, poster: store.poster(for: title))
                             .aspectRatio(0.78, contentMode: .fit)
                         Text(title.name)
                             .font(.subheadline.weight(.semibold))
@@ -373,6 +375,7 @@ private struct KinoTitleGrid: View {
                     .clipShape(RoundedRectangle(cornerRadius: 15))
                 }
                 .buttonStyle(.plain)
+                .task(id: store.coverScope) { await store.loadCover(for: title) }
             }
         }
     }
@@ -380,10 +383,11 @@ private struct KinoTitleGrid: View {
 
 private struct KinoCover: View {
     let title: KinoTitle
+    var poster: URL? = nil
 
     var body: some View {
         GeometryReader { geometry in
-            AsyncImage(url: title.poster) { phase in
+            AsyncImage(url: poster ?? title.poster) { phase in
                 if let image = phase.image {
                     image.resizable()
                         .scaledToFill()
@@ -973,7 +977,8 @@ private final class KinoPlayerSession: ObservableObject {
         guard item.status == .readyToPlay, !preparing else { return }
         preparing = true
         let duration = item.duration.seconds
-        let position = duration.isFinite ? min(resumeTime, max(0, duration - 0.25)) : 0
+        // AVPlayer can become ready before it knows the video's duration.
+        let position = duration.isFinite && duration > 0 ? min(resumeTime, max(0, duration - 0.25)) : resumeTime
         if position > 0.5 {
             player.seek(to: CMTime(seconds: position, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) {
                 [weak self] completed in

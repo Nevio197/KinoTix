@@ -100,13 +100,14 @@ final class TvSync implements AutoCloseable {
                 more = pending.length() == 100;
             }
             JSONArray catalogs = read(user, "catalog", 100, 100);
+            JSONArray media = read(user, "media", 250, 5000);
             JSONArray progress = read(user, "progress", 500, 5000);
             String playing;
             synchronized (this) {
                 if (!current(ticket)) return;
                 playing = activeEpisode;
             }
-            changed = data.applySyncRows(catalogs, progress, playing);
+            changed = data.applySyncRows(catalogs, media, progress, playing);
             for (TvLibrary.Catalog catalog : data.catalogsNeedingRefresh()) {
                 synchronized (this) {
                     if (!current(ticket)) return;

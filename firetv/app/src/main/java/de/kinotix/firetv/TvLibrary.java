@@ -19,6 +19,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -45,10 +48,15 @@ final class TvLibrary {
     private static final int MAX_INPUT = 2 * 1024 * 1024;
     private static final int MAX_SNAPSHOT = 12 * 1024 * 1024;
     private static final int MAX_ACCOUNT_CATALOGS = 30;
+    private static final int MAX_MEDIA_ADDRESS = 4096;
+    private static final int MAX_REMOTE_MEDIA = 5000;
     private static final int MAX_REMOTE_PROGRESS = 5000;
     private static final String PENDING = "sync-pending:";
     private static final String CATALOG_CLOCK = "sync-clock:";
     private static final String CATALOG_REFRESH = "sync-refresh:";
+    private static final String MEDIA_CLOCK = "sync-media-clock:";
+    private static final String MANAGED_MEDIA = "sync-media-managed:";
+    private static final String MEDIA_ACTIVATED = "sync-media-activated";
     private static final Pattern MEDIA_PATH = Pattern.compile(".*\\.(mp4|m4v|webm|mov|ogv|m3u8|mkv|ts)$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern CATALOG_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,30}");
@@ -58,6 +66,12 @@ final class TvLibrary {
             Pattern.CASE_INSENSITIVE);
     private static final Pattern MEDIA_ID = Pattern.compile("media:[a-f0-9]{64}");
     private static final Pattern TITLE_ID = Pattern.compile("catalog:([a-z0-9][a-z0-9-]{0,30}):([A-Za-z0-9_-]{2,1400})");
+    private static final Pattern PRIVATE_PARAMETER = Pattern.compile(
+            "authorization|token|auth|key|secret|signature|sig|credential|password|jwt|expires|session|policy");
+    private static final Pattern PRIVATE_COMPACT_PARAMETER = Pattern.compile(
+            "accesstoken|accesskey|refreshtoken|authkey|apikey|hdnea|hdnts");
+    private static final Pattern ENCODED_DOT = Pattern.compile("(?i)%2e");
+    private static final Pattern OUTER_SPACE = Pattern.compile("^[\\p{Z}\\s\\uFEFF]+|[\\p{Z}\\s\\uFEFF]+$");
 
     static final class Title {
         final String id, title, poster, provider, description;
@@ -413,23 +427,109 @@ final class TvLibrary {
             JSONObject row = sent.optJSONObject(index);
             if (row == null) continue;
             String key = PENDING + row.optString("item_id", "");
-            boolean catalog = "catalog".equals(row.optString("kind", ""));
-            SharedPreferences storage = catalog ? library : primary;
+            String kind = row.optString("kind", "");
+            boolean mediaSource = "catalog".equals(kind) || "media".equals(kind);
+            if (!mediaSource && !"progress".equals(kind)) continue;
+            SharedPreferences storage = mediaSource ? library : primary;
             JSONObject pending = readObject(storage.getString(key, ""));
             if (pending != null && pending.optLong("updated_at") == row.optLong("updated_at")) {
-                (catalog ? catalogEdit : progressEdit).remove(key);
+                (mediaSource ? catalogEdit : progressEdit).remove(key);
             }
         }
         catalogEdit.apply();
         progressEdit.apply();
     }
 
-    synchronized boolean applySyncRows(JSONArray catalogRows, JSONArray progressRows, String activeEpisodeId)
+    synchronized boolean applySyncRows(JSONArray catalogRows, JSONArray mediaRows, JSONArray progressRows,
+                                       String activeEpisodeId)
             throws IOException, JSONException {
         if (!isAccountLibrary()) return false;
         activeSyncEpisodeId = activeEpisodeId;
         boolean catalogsChanged = applyCatalogRows(catalogRows);
-        return applyProgressRows(progressRows, activeEpisodeId) || catalogsChanged;
+        boolean mediaChanged = applyMediaRows(mediaRows);
+        return applyProgressRows(progressRows, activeEpisodeId) || catalogsChanged || mediaChanged;
+    }
+
+    private boolean applyMediaRows(JSONArray rows) throws IOException, JSONException {
+        if (rows == null || rows.length() == 0) return false;
+        LinkedHashMap<String, Title> next = new LinkedHashMap<>(titles);
+        Map<String, Long> clocks = new LinkedHashMap<>();
+        Map<String, Boolean> managed = new LinkedHashMap<>();
+        SharedPreferences.Editor edit = library.edit();
+        boolean changed = false;
+        for (int index = 0; index < rows.length() && index < MAX_REMOTE_MEDIA; index++) {
+            JSONObject row = rows.optJSONObject(index);
+            if (row == null || !"media".equals(row.optString("kind"))) continue;
+            String id = row.optString("item_id", "");
+            long timestamp = syncTimestamp(row);
+            JSONObject value = row.optJSONObject("value");
+            if (!MEDIA_ID.matcher(id).matches() || timestamp <= 0 || value == null ||
+                    timestamp <= clocks.getOrDefault(id, library.getLong(MEDIA_CLOCK + id, 0))) continue;
+            Title prior = next.get(id);
+            if (Boolean.TRUE.equals(value.opt("removed"))) {
+                if (managed.getOrDefault(id, library.getBoolean(MANAGED_MEDIA + id, false)) &&
+                        directTitleAddress(prior) != null) {
+                    next.remove(id);
+                    changed = true;
+                }
+                managed.put(id, false);
+                edit.remove(MANAGED_MEDIA + id);
+            } else {
+                String address = portableMediaAddress(value.opt("url"));
+                String name = portableMediaTitle(value.opt("title"));
+                if (address == null || !id.equals("media:" + digest(address)) || name == null ||
+                        (prior != null && directTitleAddress(prior) == null)) continue;
+                Title incoming = single(address, name);
+                if (prior == null || !prior.title.equals(incoming.title)) {
+                    next.put(id, incoming);
+                    changed = true;
+                }
+                managed.put(id, true);
+                edit.putBoolean(MANAGED_MEDIA + id, true);
+            }
+            clocks.put(id, timestamp);
+            edit.putLong(MEDIA_CLOCK + id, timestamp);
+        }
+        if (changed) store(next, catalogs, edit);
+        else if (!clocks.isEmpty()) edit.apply();
+        return changed;
+    }
+
+    synchronized boolean canActivateExistingMediaSync() {
+        if (!isAccountLibrary() || library.getBoolean(MEDIA_ACTIVATED, false)) return false;
+        for (Title title : titles.values()) {
+            if (mediaEligibleForActivation(title)) return true;
+        }
+        return false;
+    }
+
+    synchronized int activateExistingMediaSync() throws JSONException {
+        if (!isAccountLibrary() || library.getBoolean(MEDIA_ACTIVATED, false)) return 0;
+        SharedPreferences.Editor edit = library.edit();
+        int count = 0;
+        for (Title title : titles.values()) {
+            if (!mediaEligibleForActivation(title)) continue;
+            queueMedia(edit, title.id, directTitleAddress(title), portableMediaTitle(title.title));
+            count++;
+        }
+        if (count > 0) edit.putBoolean(MEDIA_ACTIVATED, true).apply();
+        return count;
+    }
+
+    private boolean mediaEligibleForActivation(Title title) {
+        return !library.contains(MEDIA_CLOCK + title.id) && directTitleAddress(title) != null &&
+                portableMediaTitle(title.title) != null;
+    }
+
+    private void queueMedia(SharedPreferences.Editor edit, String id, String address, String name)
+            throws JSONException {
+        long timestamp = nextTimestamp(library.getLong(MEDIA_CLOCK + id, 0));
+        JSONObject value = address == null ? new JSONObject().put("removed", true) :
+                new JSONObject().put("url", address).put("title", name);
+        edit.putLong(MEDIA_CLOCK + id, timestamp)
+                .putString(PENDING + id, syncRow("media", id, timestamp, value).toString());
+        if (address == null) edit.remove(MANAGED_MEDIA + id);
+        else edit.putBoolean(MANAGED_MEDIA + id, true);
     }
 
     private boolean applyCatalogRows(JSONArray rows) throws IOException, JSONException {
@@ -697,7 +797,7 @@ final class TvLibrary {
             String label = requested.getPath();
             label = label.substring(label.lastIndexOf('/') + 1).replaceFirst("(?i)\\.[a-z0-9]{2,5}$", "");
             Title title = single(requested.toString(), label.isEmpty() ? requested.getHost() : label);
-            return addTitles(Collections.singletonList(title));
+            return addTitles(Collections.singletonList(title), !address.contains("#"));
         }
         String html = reply.body;
         if (reply.type.contains("json") || html.trim().startsWith("{") || html.trim().startsWith("[")) {
@@ -1182,19 +1282,36 @@ final class TvLibrary {
     }
 
     private synchronized List<Title> addTitles(List<Title> imported) throws IOException, JSONException {
+        return addTitles(imported, false);
+    }
+
+    private synchronized List<Title> addTitles(List<Title> imported, boolean shareDirect)
+            throws IOException, JSONException {
         LinkedHashMap<String, Title> next = new LinkedHashMap<>(titles);
+        SharedPreferences.Editor edit = library.edit();
         for (Title title : imported) {
             next.remove(title.id);
             next.put(title.id, title);
+            if (shareDirect && isAccountLibrary()) {
+                String address = directTitleAddress(title);
+                String name = portableMediaTitle(title.title);
+                if (address != null && name != null) queueMedia(edit, title.id, address, name);
+            }
         }
-        store(next, catalogs);
+        store(next, catalogs, edit);
         return imported;
     }
 
     synchronized void remove(Title title) throws IOException, JSONException {
         LinkedHashMap<String, Title> next = new LinkedHashMap<>(titles);
-        next.remove(title.id);
-        store(next, catalogs);
+        Title removed = next.remove(title.id);
+        if (removed == null) return;
+        SharedPreferences.Editor edit = library.edit();
+        if (isAccountLibrary() && library.getBoolean(MANAGED_MEDIA + removed.id, false) &&
+                directTitleAddress(removed) != null) {
+            queueMedia(edit, removed.id, null, null);
+        }
+        store(next, catalogs, edit);
     }
 
     private void store(LinkedHashMap<String, Title> nextTitles, LinkedHashMap<String, Catalog> nextCatalogs)
@@ -1354,13 +1471,105 @@ final class TvLibrary {
         return MEDIA_PATH.matcher(uri.getPath()).matches();
     }
 
+    private static String directTitleAddress(Title title) {
+        if (title == null || title.catalogId != null || title.isSeries || title.episodes.size() != 1) return null;
+        Episode episode = title.episodes.get(0);
+        if (!title.id.equals(episode.id) || episode.season != 1 || episode.episode != 1 ||
+                episode.sources.size() != 1 || episode.sources.get(0).variants.size() != 1) return null;
+        String address = portableMediaAddress(episode.sources.get(0).variants.get(0).url);
+        return address != null && title.id.equals("media:" + digest(address)) ? address : null;
+    }
+
+    private static String portableMediaAddress(Object raw) {
+        if (!(raw instanceof String)) return null;
+        String value = (String) raw;
+        try {
+            URI uri = https(value, MAX_MEDIA_ADDRESS);
+            if (!value.equals(uri.toString()) || !sameDesktopHost(uri.getHost()) ||
+                    decodeMediaText(value, false) == null) return null;
+            // Java and desktop URL parsers treat percent-encoded dot segments differently.
+            for (String segment : uri.getRawPath().split("/")) {
+                String dots = ENCODED_DOT.matcher(segment).replaceAll(".");
+                if (dots.equals(".") || dots.equals("..")) return null;
+            }
+            String query = uri.getRawQuery();
+            if (query == null) return value;
+            // The desktop HTTPS URL serializer escapes this character.
+            if (query.indexOf('\'') >= 0) return null;
+            for (String part : query.split("[&;]")) {
+                int equals = part.indexOf('=');
+                String key = decodeMediaText(equals < 0 ? part : part.substring(0, equals), true);
+                if (key == null) return null;
+                String name = OUTER_SPACE.matcher(key).replaceAll("").toLowerCase(Locale.ROOT);
+                if (name.startsWith("x-amz-") || name.startsWith("x-goog-") ||
+                        PRIVATE_COMPACT_PARAMETER.matcher(name).matches()) return null;
+                for (String token : name.split("[^a-z0-9]+")) {
+                    if (PRIVATE_PARAMETER.matcher(token).matches()) return null;
+                }
+            }
+            return value;
+        } catch (IOException error) {
+            return null;
+        }
+    }
+
+    private static boolean sameDesktopHost(String host) {
+        String[] labels = host.split("\\.");
+        if (labels.length == 0) return false;
+        if (!labels[labels.length - 1].matches("([0-9]+|0x[0-9a-f]*)")) return true;
+        if (labels.length != 4 || host.endsWith(".")) return false;
+        for (String label : labels) {
+            if (!label.matches("(0|[1-9][0-9]{0,2})") || Integer.parseInt(label) > 255) return false;
+        }
+        return true;
+    }
+
+    private static String portableMediaTitle(Object raw) {
+        if (!(raw instanceof String)) return null;
+        String title = OUTER_SPACE.matcher((String) raw).replaceAll("");
+        return !title.isEmpty() && title.length() <= 150 && !hasMediaControls(title) ? title : null;
+    }
+
+    private static String decodeMediaText(String raw, boolean formKey) throws CharacterCodingException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            char value = raw.charAt(i);
+            if (value == '%') {
+                if (i + 2 >= raw.length()) return null;
+                int first = Character.digit(raw.charAt(++i), 16), second = Character.digit(raw.charAt(++i), 16);
+                if (first < 0 || second < 0) return null;
+                bytes.write(first * 16 + second);
+            } else {
+                bytes.write(formKey && value == '+' ? ' ' : value);
+            }
+        }
+        String name = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes.toByteArray()))
+                .toString();
+        return hasMediaControls(name) ? null : name;
+    }
+
+    private static boolean hasMediaControls(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char value = text.charAt(i);
+            if (value <= 0x1f || value == 0x7f) return true;
+        }
+        return false;
+    }
+
     private static URI directHttps(String value) throws IOException {
         int hash = value.indexOf('#');
-        return https(hash >= 0 ? value.substring(0, hash) : value);
+        URI address = https(hash >= 0 ? value.substring(0, hash) : value, MAX_MEDIA_ADDRESS);
+        if (address.toString().length() > MAX_MEDIA_ADDRESS) throw new IOException("Die Video-Adresse ist zu lang.");
+        return address;
     }
 
     private static URI https(String value) throws IOException {
-        if (value == null || value.isEmpty() || value.length() > 2048 || value.indexOf('\\') >= 0) {
+        return https(value, 2048);
+    }
+
+    private static URI https(String value, int limit) throws IOException {
+        if (value == null || value.isEmpty() || value.length() > limit || value.indexOf('\\') >= 0) {
             throw new IOException("Gib eine vollständige HTTPS-Adresse ein.");
         }
         try {

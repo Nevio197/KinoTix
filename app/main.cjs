@@ -3,7 +3,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { setTimeout: delay } = require('node:timers/promises')
 const { openLibrary } = require('./library.cjs')
-const { openMedia, formats } = require('./media.cjs')
+const { openMedia, openAccountMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
@@ -23,7 +23,7 @@ const mediaTimeout = 12000
 const webOptions = { sandbox: true, contextIsolation: true, nodeIntegration: false }
 const control = controller(playerScript)
 const catalogViews = new Set()
-let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, folder
+let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, deviceMedia, folder
 let catalog, deviceCatalog, playbackRequest=0
 let networkSettings, networkRestartPending = false
 let sleepJob, sleepMinutes = null, sleepAtEnd = false
@@ -79,6 +79,25 @@ const inspectSource=(url,target)=>checkSource(url,{
 function rememberMedia(item) {
   applyProgress(item.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
   return {kind:'video',item}
+}
+function saveMediaLinks(records) {
+  sync.recordMedia(records)
+  if (media.apply(records)) notify({type:'library'})
+}
+function addDirectMedia(payload, recognizedURL) {
+  if (media===deviceMedia) return deviceMedia.addURL(recognizedURL,payload)
+  const input=String(payload.url ?? '').trim()
+  const source=/^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : 'https://'+input
+  const row=media.makeLink(source,payload)
+  saveMediaLinks([row])
+  media.annotate(row.id,typeof payload.imdb==='string' ? payload.imdb.trim() : null)
+  return media.detail(row.id)
+}
+function visibleLibrary() {
+  const snapshot=library.snapshot()
+  if (media===deviceMedia) return snapshot
+  return {...snapshot,history:snapshot.history.filter(item=>!media.unavailable(item.url)),
+    lists:snapshot.lists.map(list=>({...list,items:Object.fromEntries(Object.entries(list.items).filter(([id])=>!media.unavailable(id)))}))}
 }
 
 async function chooseSourceFile(payload) {
@@ -221,6 +240,7 @@ function bindAccount(id) {
   fs.mkdirSync(location,{recursive:true})
   library = id ? openLibrary(location) : deviceLibrary
   catalog = id ? openCatalog(location,catalogOptions) : deviceCatalog
+  media = id ? openAccountMedia(location,deviceMedia) : deviceMedia
   notify({type:'account-library'})
 }
 
@@ -489,6 +509,23 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (action === 'sync-sign-in') { await closePlayback(); return sync.signIn() }
   if (action === 'sync-sign-out') { await closePlayback(); return sync.signOut() }
   if (action === 'sync-refresh') { await sync.exchange(); return sync.status() }
+  if (action === 'media-local-candidates') return media===deviceMedia ? [] : media.copyable()
+  if (action === 'media-copy-local') {
+    if (media===deviceMedia || !Array.isArray(payload.ids) || payload.ids.length>1000) {
+      throw Error('Wähle lokale Videolinks in deinem KinoTix-Konto.')
+    }
+    const records=media.copy(new Set(payload.ids))
+    if (records.length) {
+      saveMediaLinks(records)
+      applyProgress(records.map(row=>sync.remoteProgress(row.id)).filter(Boolean))
+    }
+    return records.length
+  }
+  if (action === 'media-remove-link') {
+    if (media===deviceMedia) throw Error('Öffne dein KinoTix-Konto.')
+    saveMediaLinks([media.remove(payload.id)])
+    return true
+  }
   if (action === 'source-preview') {
     const {source,...result}=await inspectSource(payload.url,catalog)
     return result
@@ -497,7 +534,7 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     const target=catalog
     const result=await inspectSource(payload.url,target)
     if (target!==catalog) throw Error('Das Konto hat sich geändert. Prüfe die Adresse erneut.')
-    if (result.kind==='video') return rememberMedia(media.addURL(result.url,payload))
+    if (result.kind==='video') return rememberMedia(addDirectMedia(payload,result.url))
     if (result.kind==='catalog') {
       sync.recordCatalog(target.importSource(result.source))
       return {kind:'catalog'}
@@ -532,7 +569,13 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
       if (result.canceled) return null
       const filename=result.filePaths[0]
       item=path.extname(filename).toLowerCase()==='.json'?media.addList(filename):media.addFile(filename,payload)
-    } else item=media.addURL(payload.url,payload)
+    } else if (media!==deviceMedia) {
+      const target=catalog
+      const result=await inspectSource(payload.url,target)
+      if (target!==catalog) throw Error('Das Konto hat sich geändert. Prüfe die Adresse erneut.')
+      if (result.kind!=='video') throw Error(result.message)
+      item=addDirectMedia(payload,result.url)
+    } else item=deviceMedia.addURL(payload.url,payload)
     applyProgress(item.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
     return item
   }
@@ -546,8 +589,8 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     applyProgress(title.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
     return title
   }
-  if (action === 'history') return library.snapshot().history
-  if (action === 'library') return library.snapshot()
+  if (action === 'history') return visibleLibrary().history
+  if (action === 'library') return visibleLibrary()
   if (action === 'profile-new' || action === 'profile-select') {
     await closePlayback()
     setSleep(null)
@@ -628,13 +671,14 @@ app.whenReady().then(() => {
     info.startupDnsError=true
   })
   library = deviceLibrary = openLibrary(folder)
-  media = openMedia(folder)
+  media = deviceMedia = openMedia(folder)
   catalog = deviceCatalog = openCatalog(folder,catalogOptions)
   audio = deviceLibrary.audio()
   let config
   try { config=JSON.parse(fs.readFileSync(path.join(__dirname,'supabase.json'),'utf8')) } catch {}
   sync = createAccountSync({folder,safeStorage,openExternal:url=>shell.openExternal(url),bind:bindAccount,apply:applyProgress,
-    applyCatalogs:items=>{if(catalog.apply(items)) notify({type:'library'})},notify,config})
+    applyCatalogs:items=>{if(catalog.apply(items)) notify({type:'library'})},
+    applyMedia:items=>{if(media!==deviceMedia && media.apply(items)) notify({type:'library'})},notify,config})
   updater = createUpdater({app,notify})
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role:'appMenu' }, { role:'editMenu' }, { role:'viewMenu', submenu:[{ role:'togglefullscreen' }] }, { role:'windowMenu' },

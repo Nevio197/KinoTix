@@ -557,7 +557,10 @@ public final class MainActivity extends Activity {
             .setPositiveButton("Entfernen", (dialog, which) -> runTask("Titel wird entfernt …", () -> {
                 source.remove(title);
                 return true;
-            }, result -> backFromDetail())).show());
+            }, result -> {
+                sync.changed();
+                backFromDetail();
+            })).show());
         actionLine(body, remove);
         focus(first != null ? first : back);
     }
@@ -949,6 +952,16 @@ public final class MainActivity extends Activity {
             signOut.setEnabled(!state.signingOut);
             refresh.setEnabled(!state.signingOut);
             buttonRow(body, back, refresh, signOut);
+            if (library.canActivateExistingMediaSync() && !state.signingOut) {
+                Button adopt = button("Vorhandene Videolinks ins Konto übernehmen", () -> {
+                    TvLibrary destination = library;
+                    runTask("Videolinks werden übernommen …", destination::activateExistingMediaSync, result -> {
+                        sync.now();
+                        showAccount();
+                    });
+                });
+                actionLine(body, adopt);
+            }
             if (!guestLibrary.catalogs().isEmpty() && !state.signingOut) {
                 Button copy = button("Lokale Kataloge ins Konto übernehmen", () -> {
                     TvLibrary destination = library;
@@ -961,7 +974,7 @@ public final class MainActivity extends Activity {
             }
             first = refresh.isEnabled() ? refresh : back;
         } else {
-            margin(body, text("Kataloge und Wiedergabestand von Mein Profil zwischen deinen Geräten synchronisieren.",
+            margin(body, text("Kataloge, Videolinks und Wiedergabestand von Mein Profil zwischen deinen Geräten synchronisieren.",
                 18, MUTED, false), 5);
             if (state.signingIn) {
                 if (state.qrUrl != null) showSignInCode(state.qrUrl);

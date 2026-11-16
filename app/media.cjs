@@ -8,6 +8,45 @@ const digest = value => createHash('sha256').update(value).digest('hex')
 const mediaID = value => typeof value === 'string' && /^media:[a-f0-9]{64}$/.test(value)
 const mediaHash = value => 'media:' + digest(value)
 const segmentTypes = ['intro','recap','outro','post_credits']
+const authParts = new Set(['authorization','token','auth','key','secret','signature','sig','credential',
+  'password','jwt','expires','session','policy'])
+const authNames = new Set(['accesstoken','accesskey','refreshtoken','authkey','apikey','hdnea','hdnts'])
+const controlCharacters = /[\u0000-\u001f\u007f]/
+const imdbID = /^tt\d{7,12}$/
+
+function accountVideoURL(value) {
+  if (typeof value!=='string' || value.length>4096 || !/^https:\/\//i.test(value) ||
+      /[\s\\#]/.test(value) || /^https:\/\/[^/?]*@/i.test(value)) return null
+  try {
+    if (controlCharacters.test(decodeURIComponent(value))) return null
+    const url=new URL(value)
+    if (url.protocol!=='https:' || url.username || url.password || url.href.length>4096) return null
+    for (const field of url.search.slice(1).split(/[&;]/)) {
+      const raw=field.split('=',1)[0].replace(/\+/g,' ')
+      const name=decodeURIComponent(raw).trim().toLowerCase()
+      if (name.startsWith('x-amz-') || name.startsWith('x-goog-') || authNames.has(name) ||
+          name.split(/[^a-z0-9]+/).some(part=>authParts.has(part))) return null
+    }
+    return url
+  } catch { return null }
+}
+
+function mediaRecord(value) {
+  if (!mediaID(value?.id) || !Number.isSafeInteger(value.updatedAt) ||
+      value.updatedAt<1 || value.updatedAt>Date.now()+300000) return null
+  const {id,updatedAt}=value
+  if (value.removed===true) return {id,updatedAt,removed:true}
+  const address=accountVideoURL(value.url)
+  const title=typeof value.title==='string' ? value.title.trim() : ''
+  if (!address || mediaHash(address.href)!==id || !title || title.length>150 || controlCharacters.test(title)) return null
+  return {id,updatedAt,url:address.href,title}
+}
+
+function defaultTitle(url) {
+  let name=path.posix.basename(url.pathname) || url.hostname
+  try { name=decodeURIComponent(name) } catch {}
+  return name.replace(/\.[a-z0-9]{2,4}$/i,'') || url.hostname
+}
 
 function videoURL(value) {
   let url
@@ -84,13 +123,14 @@ function openMedia(folder) {
   let items
   try { items = JSON.parse(fs.readFileSync(file,'utf8')) } catch {}
   items ??= {}
+  const view=mediaView(id=>items[id],()=>Object.values(items).reverse())
 
   function save(item) {
     const next = {...items,[item.url]:item}
     fs.writeFileSync(file+'.tmp',JSON.stringify(next),{mode:0o600})
     fs.renameSync(file+'.tmp',file)
     items=next
-    return detail(item.url)
+    return view.detail(item.url)
   }
   function add(source, identity, metadata, fallback) {
     const url = 'media:' + identity
@@ -102,10 +142,7 @@ function openMedia(folder) {
 
   function addURL(value, metadata) {
     const url = videoURL(value)
-    const label = path.posix.basename(url.pathname)
-    let title = label || url.hostname
-    try { title = decodeURIComponent(title) } catch {}
-    return add(url.href,digest(url.href),metadata,title.replace(/\.[a-z0-9]{2,4}$/i,''))
+    return add(url.href,digest(url.href),metadata,defaultTitle(url))
   }
 
   function addFile(filename, metadata) {
@@ -157,29 +194,37 @@ function openMedia(folder) {
     return save({url,title:input.title.trim().slice(0,150),imdb,isSeries,episodes})
   }
 
-  const entries = item => item.episodes ?? [{
-    id:item.url,season:1,episode:1,segments:item.segments,sources:[{name:'Originalquelle',variants:[{url:item.source,height:0}]}],
-  }]
+  return {
+    addURL,addFile,addList,
+    ...view,
+    rawItem:id=>items[id],
+    rawItems:()=>Object.values(items).reverse(),
+  }
+}
 
-  function requireItem(url) {
-    const item = mediaID(url) && items[url]
+function episodeEntries(item) {
+  return item.episodes ?? [{id:item.url,season:1,episode:1,segments:item.segments,
+    sources:[{name:'Originalquelle',variants:[{url:item.source,height:0}]}]}]
+}
+
+function mediaView(find, visible) {
+  function requireItem(id) {
+    const item=mediaID(id) && find(id)
     if (!item) throw Error('Füge diese Datei oder Video-Adresse auf diesem Gerät hinzu.')
     return item
   }
-
-  function detail(url) {
-    const item = requireItem(url)
-    const {source,episodes,segments,...metadata} = item
-    return {...metadata,episodes:entries(item).map(({id,season,episode})=>({id,season,episode}))}
+  function detail(id) {
+    const item=requireItem(id)
+    const {source,episodes,segments,...metadata}=item
+    return {...metadata,episodes:episodeEntries(item).map(({id,season,episode})=>({id,season,episode}))}
   }
-
   return {
-    addURL,addFile,addList,detail,
-    all:()=>Object.keys(items).reverse().map(detail),
-    episode(url,season,number) { return entries(requireItem(url)).find(item=>item.season===season && item.episode===number) },
+    detail,
+    all:()=>visible().map(item=>detail(item.url)),
+    episode(id,season,number) { return episodeEntries(requireItem(id)).find(item=>item.season===season && item.episode===number) },
     byProgressID(id) {
-      for (const item of Object.values(items)) {
-        const episode=entries(item).find(entry=>entry.id===id)
+      for (const item of visible()) {
+        const episode=episodeEntries(item).find(entry=>entry.id===id)
         if (episode) return {title:detail(item.url),episode}
       }
       return null
@@ -187,4 +232,74 @@ function openMedia(folder) {
   }
 }
 
-module.exports = {openMedia,mediaID,formats}
+function openAccountMedia(folder, device) {
+  const file=path.join(folder,'media-links.json')
+  let saved
+  try { saved=JSON.parse(fs.readFileSync(file,'utf8')) } catch {}
+  const savedRecords=Array.isArray(saved) ? saved : saved?.records
+  let records=new Map((Array.isArray(savedRecords) ? savedRecords : []).map(mediaRecord).filter(Boolean).map(row=>[row.id,row]))
+  let annotations=Object.fromEntries(Object.entries(saved?.annotations ?? {}).filter(([id,value])=>mediaID(id) && imdbID.test(value)))
+  const item=row=>row && !row.removed ? {url:row.id,source:row.url,title:row.title,isSeries:false,accountLink:true,
+    imdb:annotations[row.id] ?? device.rawItem(row.id)?.imdb} : undefined
+  function save(next,notes=annotations) {
+    fs.writeFileSync(file+'.tmp',JSON.stringify({records:[...next.values()],annotations:notes}),{mode:0o600})
+    fs.renameSync(file+'.tmp',file)
+    records=next
+    annotations=notes
+  }
+  const find=id=>item(records.get(id)) ?? device.rawItem(id)
+  function visible() {
+    const links=[...records.values()].filter(row=>!row.removed).sort((a,b)=>b.updatedAt-a.updatedAt).map(item)
+    const ids=new Set(links.map(row=>row.url))
+    return [...links,...device.rawItems().filter(row=>!ids.has(row.url))]
+  }
+  function apply(incoming) {
+    const next=new Map(records)
+    let changed=false
+    for (const raw of incoming) {
+      const row=mediaRecord(raw)
+      if (!row || (next.get(row.id)?.updatedAt ?? 0)>=row.updatedAt) continue
+      next.set(row.id,row)
+      changed=true
+    }
+    if (!changed) return false
+    save(next)
+    return true
+  }
+  const nextTime=id=>Math.max(Date.now(),(records.get(id)?.updatedAt ?? 0)+1)
+  function makeLink(value,metadata={}) {
+    const address=accountVideoURL(value)
+    if (!address) throw Error('Das Konto kann nur HTTPS-Videolinks ohne Zugangsdaten, Signaturen oder Fragmente übernehmen.')
+    const id=mediaHash(address.href)
+    const provided=typeof metadata.title==='string' ? metadata.title.replace(/[\u0000-\u001f\u007f]/g,' ').trim() : ''
+    const title=(provided || item(records.get(id))?.title || defaultTitle(address)).slice(0,150)
+    const row=mediaRecord({id,updatedAt:nextTime(id),url:address.href,title})
+    if (!row) throw Error('Der Videolink konnte nicht für das Konto gespeichert werden.')
+    return row
+  }
+  function copyable() {
+    return device.rawItems().flatMap(local=>{
+      const address=local.episodes ? null : accountVideoURL(local.source)
+      if (!address || records.has(local.url) || mediaHash(address.href)!==local.url) return []
+      return [{id:local.url,title:local.title,hostname:address.hostname}]
+    })
+  }
+  return {
+    ...mediaView(find,visible),
+    addFile:device.addFile,addList:device.addList,apply,makeLink,copyable,
+    annotate(id,imdb) {
+      if (!mediaID(id) || typeof imdb!=='string' || !imdbID.test(imdb) || annotations[id]===imdb) return
+      save(records,{...annotations,[id]:imdb})
+    },
+    copy(ids) {
+      return copyable().filter(row=>ids.has(row.id)).map(row=>makeLink(device.rawItem(row.id).source,row))
+    },
+    remove(id) {
+      if (!mediaID(id) || !item(records.get(id))) throw Error('Dieser Videolink ist nicht im Konto gespeichert.')
+      return {id,updatedAt:nextTime(id),removed:true}
+    },
+    unavailable(id) { return records.get(id)?.removed===true && !device.rawItem(id) },
+  }
+}
+
+module.exports = {openMedia,openAccountMedia,mediaRecord,mediaID,formats}

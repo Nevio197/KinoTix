@@ -2,7 +2,7 @@
 
 Die Android-App läuft eigenständig auf Fire OS ab Version 6 (Android API 25). Sie braucht Internetzugang für HTTPS-Quellen und GitHub-Updates. Die App nutzt die Android-Version von Fire OS. Vega OS verwendet ein eigenes App-Format.
 
-Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.5) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
+Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.6) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
 
 Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. Über **Quelle hinzufügen** akzeptiert KinoTix direkte HTTPS-Videos, Medienlisten und KinoTix-Kataloge mit statischen HTML-Quellen. Die lokale Dateiauswahl hängt von den verfügbaren Apps auf dem Gerät ab. Bei der Wiedergabe blendet sich die Leiste nach kurzer Zeit aus. Mit einer Richtungstaste lässt sie sich wieder einblenden. Die mittlere Taste pausiert die Wiedergabe und setzt sie fort.
 
@@ -10,7 +10,9 @@ Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. 
 
 Ab Version 0.1.5 öffnest du **Einstellungen → Google-Konto → Mit Handy anmelden** und scannst den QR-Code. Melde dich auf dem Handy mit demselben Google-Konto wie am Mac an. Wähle am Fernseher **Mit diesem Konto verbinden**, wenn das angezeigte Konto stimmt. Der QR-Code ist fünf Minuten gültig. Die Anmeldung im TV-Browser steht ebenfalls im Kontomenü.
 
-Anschließend synchronisiert KinoTix Kataloge und den Wiedergabestand von **Mein Profil**. Über **Jetzt synchronisieren** lässt sich der Abgleich sofort anstoßen. Merkliste, Zusatzprofile und die Adressen einzeln importierter Videos bleiben auf dem jeweiligen Gerät. Für denselben direkten Videolink kannst du den Spielstand abrufen, sobald du die Adresse auch auf dem zweiten Gerät importiert hast.
+Anschließend synchronisiert KinoTix Kataloge, direkte HTTPS-Videolinks und den Wiedergabestand von **Mein Profil**. Wenn du einen Videolink im angemeldeten Konto hinzufügst, erscheint der Titel auf den angemeldeten Geräten. Über **Jetzt synchronisieren** lässt sich der Abgleich sofort anstoßen. Über **Vorhandene Videolinks ins Konto übernehmen** kannst du bereits im Fire-TV-Konto gespeicherte Links nachträglich übertragen.
+
+Merkliste, Zusatzprofile, lokale Dateien und Links mit erkennbaren Zugangsdaten bleiben auf dem jeweiligen Gerät. Als Datei importierte Medienlisten werden wie lokale Dateien behandelt.
 
 Im Gastmodus gespeicherte Kataloge kannst du im Kontomenü ausdrücklich ins Konto übernehmen. Nach dem Abmelden öffnet sich wieder die Gastmediathek.
 

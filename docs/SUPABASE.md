@@ -1,6 +1,6 @@
 # Konten und Synchronisierung mit Supabase
 
-KinoTix speichert Gastkataloge und den Gastverlauf auf dem Gerät. Nach der Google-Anmeldung lädt die App den Katalog und den Wiedergabestand aus dem eigenen Supabase-Konto. Ein Katalog, der im Gastmodus eingerichtet wurde, lässt sich über **Einstellungen → Kataloge → Lokale Kataloge ins Konto übernehmen** kopieren. Beim Abmelden öffnet KinoTix wieder den Gastbereich.
+KinoTix speichert Gastkataloge und den Gastverlauf auf dem Gerät. Nach der Google-Anmeldung lädt die App Kataloge, direkte HTTPS-Videolinks und den Wiedergabestand aus dem eigenen Supabase-Konto. Neue Kataloge und Videolinks, die du im Konto hinzufügst, erscheinen auf den verbundenen Geräten. Ein Katalog, der im Gastmodus eingerichtet wurde, lässt sich über **Einstellungen → Kataloge → Lokale Kataloge ins Konto übernehmen** kopieren. Beim Abmelden öffnet KinoTix wieder den Gastbereich.
 
 Auf Fire TV liegen An- und Abmeldung, der manuelle Abgleich und die Katalogübernahme unter **Einstellungen → Google-Konto**. Der Fire TV nutzt denselben Dienst und speichert seine eigene Anmeldung verschlüsselt im Android-Keystore. [Fire TV einrichten](FIRE-TV.md)
 
@@ -27,6 +27,7 @@ Der Publishable Key ist für Desktop-Clients vorgesehen. Die Datenbank prüft zu
 
 - Supabase Auth verwaltet die Google-Identität des Nutzers und seine Anmeldung.
 - Katalogeinträge enthalten den vom Nutzer importierten Namen, die Adresse und die Leseregeln. Es gibt keinen vorinstallierten Katalog. Katalogadressen dürfen keine Zugangsdaten enthalten.
-- Wiedergabestände enthalten Medienkennung, Position und Abschlussstatus. Bei Katalogtiteln wird zusätzlich eine Titelreferenz gespeichert, damit die Folge auf dem zweiten Rechner unter **Weiterschauen** erscheint. Lokale Dateipfade und aufgelöste Videolinks bleiben auf dem Gerät.
+- Direkte HTTPS-Videolinks enthalten die Adresse und den Titel. URLs mit erkennbaren Zugangsdaten, lokale Dateipfade und von Katalogen aufgelöste Streamadressen bleiben auf dem Gerät.
+- Wiedergabestände enthalten Medienkennung, Position und Abschlussstatus. Bei Katalogtiteln wird zusätzlich eine Titelreferenz gespeichert, damit die Folge auf dem zweiten Gerät unter **Weiterschauen** erscheint.
 - Änderungen werden lokal zwischengespeichert und beim nächsten Sync zusammengeführt. Eine ältere Änderung überschreibt keinen neueren Stand. Beim Entfernen eines Katalogs wird ein Löschvermerk synchronisiert.
 - Der Wiedergabestand von **Mein Profil** wird synchronisiert. Weitere Profile und Merklisten bleiben auf dem Gerät. KinoTix hostet keine Videos.

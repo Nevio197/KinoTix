@@ -2,7 +2,7 @@ const fs=require('node:fs')
 const path=require('node:path')
 const {createServer}=require('node:http')
 const {createHash,randomBytes}=require('node:crypto')
-const {mediaID}=require('./media.cjs')
+const {mediaID,mediaRecord}=require('./media.cjs')
 const {reference,catalogRecord,episodeID}=require('./catalog-format.cjs')
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -68,9 +68,10 @@ const recordKey=(kind,id)=>kind+':'+id
 function decode(row) {
   if (row?.kind==='catalog') return catalogRecord({...row.value,id:row.item_id,updatedAt:row.updated_at})
   if (row?.kind==='progress') return progress({...row.value,id:row.item_id,updatedAt:row.updated_at})
+  if (row?.kind==='media') return mediaRecord({...row.value,id:row.item_id,updatedAt:row.updated_at})
   return null
 }
-function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCatalogs,notify,config,fetcher=fetch,authorizeBrowser=authorize}) {
+function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCatalogs,applyMedia=()=>{},notify,config,fetcher=fetch,authorizeBrowser=authorize}) {
   const project=validConfig(config)
   const filename=path.join(folder,'account.json')
   const stored=read(filename)
@@ -117,9 +118,13 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
     pending=new Map()
     const saved=owner && read(pendingFile(owner))
     for (const row of Array.isArray(saved)?saved:[]) {
-      if (decode(row)) pending.set(recordKey(row.kind,row.item_id),row)
+      const decoded=decode(row)
+      if (!decoded) continue
+      const {id,updatedAt,...value}=decoded
+      pending.set(recordKey(row.kind,id),{kind:row.kind,item_id:id,updated_at:updatedAt,value})
     }
     bind(owner?.id)
+    if (owner) applyMedia([...pending.values()].filter(row=>row.kind==='media').map(decode))
     schedule(0)
     emit()
   }
@@ -159,9 +164,10 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
       }
       write(pendingFile(owner),[...pending.values()])
     }
-    const [catalogs,items]=await Promise.all([readItems('catalog',auth),readItems('progress',auth)])
+    const [catalogs,addresses,items]=await Promise.all([readItems('catalog',auth),readItems('media',auth),readItems('progress',auth)])
     if (account!==owner) return
     applyCatalogs(catalogs)
+    applyMedia(addresses)
     downloaded=new Map(items.map(item=>[item.id,item]))
     apply(items)
     issue=''
@@ -182,21 +188,25 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
     })
     return flight
   }
-  function queue(kind,item) {
-    if (!account || !item) return
-    const item_id=item.id
-    const mapKey=recordKey(kind,item_id)
-    const updated_at=Math.max(item.updatedAt,(pending.get(mapKey)?.updated_at ?? 0)+1)
-    const {id,updatedAt,...value}=item
-    pending.set(mapKey,{kind,item_id,updated_at,value})
-    write(pendingFile(account),[...pending.values()])
+  function queue(kind,items) {
+    if (!account || !items.length) return
+    const next=new Map(pending)
+    for (const item of items) {
+      const {id,updatedAt,...value}=item
+      const key=recordKey(kind,id)
+      const updated_at=Math.max(updatedAt,(next.get(key)?.updated_at ?? 0)+1)
+      next.set(key,{kind,item_id:id,updated_at,value})
+    }
+    write(pendingFile(account),[...next.values()])
+    pending=next
     if (!flight && !issue && (!timer || timerDue>Date.now()+2000)) schedule(2000)
   }
   return {
     status,exchange,
     remoteProgress:id=>downloaded.get(id),
-    record(id,saved,catalog) { if (saved) queue('progress',progress({id,...saved,catalog})) },
-    recordCatalog(value) { queue('catalog',catalogRecord(value)) },
+    record(id,saved,catalog) { if (saved) queue('progress',[progress({id,...saved,catalog})].filter(Boolean)) },
+    recordCatalog(value) { queue('catalog',[catalogRecord(value)].filter(Boolean)) },
+    recordMedia(values) { queue('media',values.map(mediaRecord).filter(Boolean)) },
     async signIn() {
       if (!project) throw Error('Das Supabase-Projekt ist für diesen Build noch nicht eingerichtet.')
       if (signingIn || restoring || account) return status()

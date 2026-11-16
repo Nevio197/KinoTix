@@ -52,6 +52,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public final class MainActivity extends Activity {
     private static final int BACKGROUND = 0xff12101a;
@@ -79,6 +80,7 @@ public final class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService artwork = Executors.newFixedThreadPool(2);
+    private final ExecutorService catalogSearch = Executors.newSingleThreadExecutor();
     private final LruCache<String, Bitmap> images = new LruCache<>(20);
     private TvLibrary guestLibrary;
     private TvLibrary library;
@@ -98,6 +100,7 @@ public final class MainActivity extends Activity {
     private int pageToken;
     private String focusTag;
     private String search = "";
+    private Future<?> catalogSearchTask;
     private TvLibrary fileLibrary;
     private Button updateButton;
     private TextView updateReport;
@@ -176,6 +179,7 @@ public final class MainActivity extends Activity {
         if (updates != null) updates.close();
         worker.shutdownNow();
         artwork.shutdownNow();
+        catalogSearch.shutdownNow();
         handler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
@@ -284,6 +288,10 @@ public final class MainActivity extends Activity {
     }
 
     private void createPage(Page next, String label) {
+        if (catalogSearchTask != null) {
+            catalogSearchTask.cancel(true);
+            catalogSearchTask = null;
+        }
         page = next;
         pageToken++;
         updateButton = null;
@@ -361,7 +369,7 @@ public final class MainActivity extends Activity {
             focus(add);
         } else {
             buttonRow(body, add);
-            addCards(titles, Page.HOME);
+            addCards(body, titles, Page.HOME);
             restoreFocus(first);
         }
     }
@@ -380,7 +388,7 @@ public final class MainActivity extends Activity {
         Button random = button("Zufällig auswählen", () ->
             openTitle(saved.get(new java.util.Random().nextInt(saved.size())), false, Page.SAVED));
         buttonRow(body, random);
-        addCards(saved, Page.SAVED);
+        addCards(body, saved, Page.SAVED);
         restoreFocus(random);
     }
 
@@ -389,17 +397,52 @@ public final class MainActivity extends Activity {
         Button edit = button("Suchbegriff ändern", () -> prompt("Mediathek durchsuchen", "Film oder Serie",
             search, InputType.TYPE_CLASS_TEXT, value -> { search = value; showSearch(); }));
         buttonRow(body, edit);
-        List<TvLibrary.Title> matches = new ArrayList<>();
-        String query = search.toLowerCase(Locale.ROOT);
-        for (TvLibrary.Title title : library.titles()) {
-            if (title.title.toLowerCase(Locale.ROOT).contains(query)) matches.add(title);
+        TvLibrary source = library;
+        String query = search.trim();
+        List<TvLibrary.Title> matches = query.isEmpty() ? source.titles() : source.search(query);
+        LinearLayout results = column();
+        body.addView(results);
+        addCards(results, matches, Page.SEARCH);
+        if (!query.isEmpty() && source.hasCatalogIndexes()) {
+            TextView status = text("Kataloge werden durchsucht …", 19, MUTED, false);
+            status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            margin(body, status, 8);
+            searchCatalogs(source, query, matches, results, status);
+        } else if (matches.isEmpty()) {
+            margin(body, text("Keine Treffer in deiner Mediathek.", 19, MUTED, false), 8);
         }
-        if (matches.isEmpty()) margin(body, text("Keine Treffer in deiner Mediathek.", 19, MUTED, false), 8);
-        else addCards(matches, Page.SEARCH);
         restoreFocus(edit);
     }
 
-    private void addCards(List<TvLibrary.Title> titles, Page origin) {
+    private void searchCatalogs(TvLibrary source, String query, List<TvLibrary.Title> local,
+                                LinearLayout results, TextView status) {
+        int request = pageToken;
+        Set<String> shown = new HashSet<>();
+        for (TvLibrary.Title title : local) shown.add(title.id);
+        catalogSearchTask = catalogSearch.submit(() -> {
+            try {
+                List<TvLibrary.Title> extra = new ArrayList<>();
+                for (TvLibrary.Title title : source.searchCatalogIndexes(query)) {
+                    if (shown.add(title.id)) extra.add(title);
+                }
+                runOnUiThread(() -> {
+                    if (request != pageToken || source != library || isDestroyed()) return;
+                    addCards(results, extra, Page.SEARCH);
+                    if (local.isEmpty() && extra.isEmpty()) status.setText("Keine Treffer in deinen Katalogen.");
+                    else body.removeView(status);
+                });
+            } catch (IOException failure) {
+                runOnUiThread(() -> {
+                    if (request == pageToken && source == library && !isDestroyed()) {
+                        String reason = failure.getMessage();
+                        status.setText(reason == null ? "Katalogsuche gerade nicht verfügbar." : reason);
+                    }
+                });
+            }
+        });
+    }
+
+    private void addCards(LinearLayout parent, List<TvLibrary.Title> titles, Page origin) {
         int columns = 3;
         for (int start = 0; start < titles.size(); start += columns) {
             LinearLayout line = row();
@@ -434,7 +477,7 @@ public final class MainActivity extends Activity {
                 card.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
                 line.addView(card, lp);
             }
-            margin(body, line, 9);
+            margin(parent, line, 9);
         }
     }
 

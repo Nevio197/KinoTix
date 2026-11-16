@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.SystemClock;
 import android.util.Base64;
+import android.util.Xml;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -13,8 +14,11 @@ import org.json.JSONTokener;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -35,6 +39,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -46,6 +51,8 @@ final class TvLibrary {
     private static final String[] MARKERS = {"intro", "recap", "outro", "post_credits"};
     private static final long MAX_DURATION = 86_400_000;
     private static final int MAX_INPUT = 2 * 1024 * 1024;
+    private static final int MAX_INDEX_BYTES = 14 * 1024 * 1024;
+    private static final int MAX_INDEX_RESULTS = 80;
     private static final int MAX_SNAPSHOT = 12 * 1024 * 1024;
     private static final int MAX_ACCOUNT_CATALOGS = 30;
     private static final int MAX_MEDIA_ADDRESS = 4096;
@@ -72,6 +79,10 @@ final class TvLibrary {
             "accesstoken|accesskey|refreshtoken|authkey|apikey|hdnea|hdnts");
     private static final Pattern ENCODED_DOT = Pattern.compile("(?i)%2e");
     private static final Pattern OUTER_SPACE = Pattern.compile("^[\\p{Z}\\s\\uFEFF]+|[\\p{Z}\\s\\uFEFF]+$");
+    private static final Pattern SLUG_NUMBER = Pattern.compile("^\\d+-");
+    private static final Pattern SLUG_EXTENSION = Pattern.compile("(?i)\\.[a-z]{2,5}$");
+    private static final Pattern SLUG_SEPARATOR = Pattern.compile("[-_]+");
+    private static final Pattern DIACRITIC = Pattern.compile("\\p{M}");
 
     static final class Title {
         final String id, title, poster, provider, description;
@@ -162,9 +173,13 @@ final class TvLibrary {
 
     static final class Catalog {
         final String id, name, origin;
+        private final URI index;
         private final JSONObject config;
         private final Set<String> catalogHosts, playerHosts, mediaHosts;
         private final JSONObject listing, detail;
+        private String cachedIndexQuery = "";
+        private long indexCacheUntil;
+        private List<IndexMatch> cachedIndexMatches = Collections.emptyList();
 
         private Catalog(JSONObject data) throws JSONException, IOException {
             id = data.getString("id");
@@ -179,6 +194,7 @@ final class TvLibrary {
             origin = base.toString();
             catalogHosts = hostSet(data.optJSONArray("catalogHosts"));
             catalogHosts.add(base.getHost());
+            index = indexAddress(data.opt("index"), catalogHosts);
             playerHosts = hostSet(data.optJSONArray("playerHosts"));
             mediaHosts = hostSet(data.getJSONArray("mediaHosts"));
             config = data;
@@ -268,6 +284,13 @@ final class TvLibrary {
 
     synchronized List<Catalog> catalogs() {
         return new ArrayList<>(catalogs.values());
+    }
+
+    synchronized boolean hasCatalogIndexes() {
+        for (Catalog source : catalogs.values()) {
+            if (source.index != null) return true;
+        }
+        return false;
     }
 
     synchronized List<Catalog> catalogsNeedingRefresh() {
@@ -1037,8 +1060,7 @@ final class TvLibrary {
             if (name.isEmpty() && image != null) name = shorten(image.attr("alt"), 180);
             if (name.isEmpty()) continue;
             String poster = poster(item, name, reply.uri);
-            String id = "catalog:" + source.id + ":" + Base64.encodeToString(path.getBytes(StandardCharsets.UTF_8),
-                    Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
+            String id = catalogTitleId(source, path);
             boolean series = !prefix.isEmpty() && path.startsWith(prefix);
             found.putIfAbsent(id, new Title(id, name, poster, source.name, "", series,
                     Collections.emptyList(), source.id, address));
@@ -1046,6 +1068,11 @@ final class TvLibrary {
         }
         if (found.isEmpty()) throw new IOException("Der Katalog enthält keine passenden Titel.");
         return new ArrayList<>(found.values());
+    }
+
+    private static String catalogTitleId(Catalog source, String path) {
+        return "catalog:" + source.id + ":" + Base64.encodeToString(path.getBytes(StandardCharsets.UTF_8),
+                Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
     }
 
     Title details(Title title) throws IOException {
@@ -1066,6 +1093,8 @@ final class TvLibrary {
         permitted.addAll(source.mediaHosts);
         String controls = selector(rules, "controls", false);
         String iframe = selector(rules, "iframe", false);
+        TvCatalogPatterns embed = TvCatalogPatterns.compile(rules.optString("embedPattern", ""), 1);
+        TvEpisodeMatrix matrix = new TvEpisodeMatrix();
         int groups = 0;
         for (Element group : document.select(selector(rules, "groups", true))) {
             if (++groups > 24) break;
@@ -1073,7 +1102,16 @@ final class TvLibrary {
             if (buttons.isEmpty()) {
                 Element embedded = iframe.isEmpty() ? null : group.selectFirst(iframe);
                 if (embedded == null) embedded = group.selectFirst("video[src], source[src]");
-                if (embedded != null) addLink(episodes, permitted, 1, 1, embedded.attr("src"), reply.uri);
+                String address = embedded == null ? "" : address(embedded.attr("src"), reply.uri);
+                if (address != null && !address.isEmpty() && permitted.contains(https(address).getHost())) {
+                    addLink(episodes, permitted, 1, 1, address, reply.uri);
+                } else {
+                    for (Element script : group.select("script:not([src])")) {
+                        for (TvEpisodeMatrix.Slot slot : matrix.read(script.data())) {
+                            addLink(episodes, permitted, slot.season, slot.number, slot.url, reply.uri);
+                        }
+                    }
+                }
                 continue;
             }
             int count = 0;
@@ -1086,6 +1124,8 @@ final class TvLibrary {
                     int season = Integer.parseInt(coordinates[0]);
                     int number = Integer.parseInt(coordinates[1]);
                     String raw = button.attr(rules.optString("sourceAttribute", "data-source"));
+                    String captured = embed == null ? null : embed.source(raw);
+                    if (captured != null) raw = captured;
                     if (raw.trim().startsWith("<")) {
                         Element frame = Jsoup.parseBodyFragment(raw).selectFirst("iframe[src], video[src], source[src]");
                         raw = frame == null ? "" : frame.attr("src");
@@ -1102,8 +1142,8 @@ final class TvLibrary {
         }
         found.sort(Comparator.comparingInt((Episode row) -> row.season).thenComparingInt(row -> row.episode));
         if (found.isEmpty()) throw new IOException("Der Katalog hat keine verfügbaren Folgen oder Videos geliefert.");
-        return new Title(title.id, name, poster, title.provider, description, title.isSeries || found.size() > 1,
-                found, source.id, title.address);
+        return rememberCatalogTitle(source, new Title(title.id, name, poster, title.provider, description,
+                title.isSeries || found.size() > 1, found, source.id, title.address));
     }
 
     Episode resolve(Title title, Episode episode) throws IOException {
@@ -1146,17 +1186,33 @@ final class TvLibrary {
         Document player = Jsoup.parse(reply.body, reply.uri.toString());
         List<Variant> variants = new ArrayList<>();
         Set<String> seen = new HashSet<>();
+        JSONObject rules = source.config.optJSONObject("player");
+        TvCatalogPatterns extract = TvCatalogPatterns.compile(rules == null ? "" : rules.optString("variants", ""), 2);
+        if (extract != null) {
+            List<TvCatalogPatterns.Match> matches = new ArrayList<>();
+            int scripts = 0;
+            for (Element script : player.select("script:not([src])")) {
+                if (++scripts > 100 || !extract.appendVariants(script.data(), matches)) break;
+            }
+            for (TvCatalogPatterns.Match match : matches) {
+                addVariant(variants, seen, source.mediaHosts, match.url, match.height, reply.uri);
+                if (variants.size() >= 10) break;
+            }
+        }
         for (Element video : player.select("video[src], video source[src]")) {
-            String url = address(video.attr("src"), reply.uri);
-            if (url == null || !seen.add(url)) continue;
-            URI candidate = https(url);
-            if (!source.mediaHosts.contains(candidate.getHost())) continue;
-            int height = height(video);
-            variants.add(new Variant(url, height, Collections.emptyMap()));
             if (variants.size() >= 10) break;
+            addVariant(variants, seen, source.mediaHosts, video.attr("src"), height(video), reply.uri);
         }
         variants.sort(Comparator.comparingInt((Variant item) -> item.height).reversed());
         return variants;
+    }
+
+    private static void addVariant(List<Variant> variants, Set<String> seen, Set<String> hosts, String raw,
+                                   int height, URI base) throws IOException {
+        String url = address(raw, base);
+        if (url != null && hosts.contains(https(url).getHost()) && seen.add(url)) {
+            variants.add(new Variant(url, height, Collections.emptyMap()));
+        }
     }
 
     private static int height(Element video) {
@@ -1277,8 +1333,203 @@ final class TvLibrary {
         return result;
     }
 
+    List<Title> searchCatalogIndexes(String query) throws IOException {
+        String value = normalize(shorten(query == null ? "" : query, 125));
+        if (value.isEmpty()) return Collections.emptyList();
+        String[] terms = value.split("\\s+");
+        PriorityQueue<IndexMatch> best = new PriorityQueue<>(INDEX_ORDER.reversed());
+        Set<String> kept = new HashSet<>();
+        long deadline = SystemClock.elapsedRealtime() + 20_000;
+        IOException firstFailure = null;
+        boolean answered = false;
+        for (Catalog source : catalogs()) {
+            if (source.index == null) continue;
+            if (SystemClock.elapsedRealtime() >= deadline) break;
+            try {
+                for (IndexMatch hit : searchIndex(source, value, terms, deadline)) keepIndexMatch(best, kept, hit);
+                answered = true;
+            } catch (IOException failure) {
+                // An unavailable index must not hide hits from another catalog.
+                if (firstFailure == null) firstFailure = failure;
+            }
+        }
+        if (!answered && firstFailure != null) {
+            throw new IOException("Die Suchindizes sind gerade nicht erreichbar. " +
+                    indexFailureMessage(firstFailure), firstFailure);
+        }
+        List<IndexMatch> ordered = new ArrayList<>(best);
+        ordered.sort(INDEX_ORDER);
+        List<Title> result = new ArrayList<>();
+        for (IndexMatch hit : ordered) result.add(hit.title);
+        return result;
+    }
+
+    private static String indexFailureMessage(IOException failure) {
+        if (failure instanceof IndexFailure) return failure.getMessage();
+        if (failure instanceof javax.net.ssl.SSLException) return "Die HTTPS-Verbindung konnte nicht bestätigt werden.";
+        if (failure instanceof java.net.UnknownHostException) return "Der Name der Quelle konnte nicht gefunden werden.";
+        if (failure instanceof java.net.SocketTimeoutException) return "Die Quelle antwortet zu langsam.";
+        return "Die Verbindung zur Quelle konnte nicht aufgebaut werden.";
+    }
+
+    private static List<IndexMatch> searchIndex(Catalog source, String query, String[] terms, long deadline)
+            throws IOException {
+        synchronized (source) {
+            if (source.cachedIndexQuery.equals(query) && source.indexCacheUntil > SystemClock.elapsedRealtime()) {
+                return source.cachedIndexMatches;
+            }
+        }
+        long limit = Math.min(deadline, SystemClock.elapsedRealtime() + 10_000);
+        HttpsURLConnection connection = sourceConnection(source.index, limit, "application/xml, text/xml, */*;q=0.5");
+        List<IndexMatch> matches;
+        try {
+            int status = connection.getResponseCode();
+            // Like desktop, no redirect is accepted for a declared sitemap URL.
+            if (status >= 300 && status < 400) throw new IndexFailure("Der Suchindex leitet weiter (HTTP " + status + ").");
+            if (status < 200 || status >= 300) throw new IndexFailure("Der Suchindex antwortet mit HTTP " + status + ".");
+            if (connection.getContentLengthLong() > MAX_INDEX_BYTES) throw new IndexFailure("Der Suchindex ist größer als 14 MB.");
+            if ("challenge".equalsIgnoreCase(connection.getHeaderField("cf-mitigated"))) {
+                throw new IndexFailure("Die Quelle verlangt eine Prüfung im Browser (HTTP " + status + ").");
+            }
+            String type = connection.getContentType();
+            if (type != null && type.toLowerCase(Locale.ROOT).startsWith("text/html")) {
+                throw new IndexFailure("Die Quelle liefert eine Webseite statt einer Sitemap (HTTP " + status + ").");
+            }
+            try (InputStream input = new IndexInput(connection.getInputStream(), limit)) {
+                matches = readIndex(source, input, query, terms);
+            }
+        } finally {
+            connection.disconnect();
+        }
+        synchronized (source) {
+            source.cachedIndexQuery = query;
+            source.indexCacheUntil = SystemClock.elapsedRealtime() + 120_000;
+            source.cachedIndexMatches = matches;
+        }
+        return matches;
+    }
+
+    private static List<IndexMatch> readIndex(Catalog source, InputStream input, String query, String[] terms)
+            throws IOException {
+        PriorityQueue<IndexMatch> best = new PriorityQueue<>(INDEX_ORDER.reversed());
+        Set<String> kept = new HashSet<>();
+        URI base = https(source.origin);
+        try {
+            XmlPullParser xml = Xml.newPullParser();
+            xml.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true);
+            // Older pull parsers reject setting an unsupported feature even when it is already off.
+            if (xml.getFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL)) {
+                xml.setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false);
+            }
+            xml.setInput(input, null);
+            String namespace = null;
+            boolean insideUrl = false;
+            int locations = 0;
+            for (int token; (token = xml.nextToken()) != XmlPullParser.END_DOCUMENT;) {
+                if (token == XmlPullParser.DOCDECL) throw new IndexFailure("Der Suchindex enthält eine DTD.");
+                if (token != XmlPullParser.START_TAG) continue;
+                int depth = xml.getDepth();
+                if (depth == 1) {
+                    if (!"urlset".equals(xml.getName())) throw new IndexFailure("Die Sitemap enthält kein URL-Verzeichnis.");
+                    namespace = xml.getNamespace();
+                } else if (depth == 2) {
+                    insideUrl = "url".equals(xml.getName()) && java.util.Objects.equals(namespace, xml.getNamespace());
+                } else if (depth == 3 && insideUrl && "loc".equals(xml.getName()) &&
+                        java.util.Objects.equals(namespace, xml.getNamespace())) {
+                    IndexMatch candidate = indexMatch(source, base, xml.nextText(), query, terms);
+                    if (candidate != null) keepIndexMatch(best, kept, candidate);
+                    if (++locations >= 80_000) break;
+                }
+            }
+            if (namespace == null) throw new IndexFailure("Der Suchindex ist leer.");
+        } catch (XmlPullParserException error) {
+            if (error.getDetail() instanceof IndexFailure) throw (IndexFailure) error.getDetail();
+            throw new IndexFailure("Der Suchindex enthält ungültiges XML.", error);
+        }
+        return new ArrayList<>(best);
+    }
+
+    private static IndexMatch indexMatch(Catalog source, URI base, String location, String query, String[] terms) {
+        String value = address(location, null);
+        if (value == null) return null;
+        URI uri = URI.create(value);
+        String path = uri.getRawPath();
+        if (!source.catalogHosts.contains(uri.getHost()) || path.startsWith("//") || path.length() > 1000) {
+            return null;
+        }
+        int end = path.length();
+        while (end > 0 && path.charAt(end - 1) == '/') end--;
+        if (end == 0) return null;
+        int start = path.lastIndexOf('/', end - 1) + 1;
+        String slug;
+        try {
+            slug = decodeMediaText(path.substring(start, end), false);
+        } catch (CharacterCodingException error) {
+            return null;
+        }
+        if (slug == null) return null;
+        slug = SLUG_NUMBER.matcher(slug).replaceFirst("");
+        slug = SLUG_EXTENSION.matcher(slug).replaceFirst("");
+        slug = SLUG_SEPARATOR.matcher(slug).replaceAll(" ").trim();
+        if (slug.isEmpty()) return null;
+        String normalized = normalize(slug);
+        for (String term : terms) if (!normalized.contains(term)) return null;
+        String title = shorten(Character.toUpperCase(slug.charAt(0)) + slug.substring(1), 180);
+        String detailAddress = address(path, base);
+        if (detailAddress == null) return null;
+        String prefix = source.detail.optString("seriesPrefix", "");
+        Title item = new Title(catalogTitleId(source, path), title, "", source.name, "",
+                !prefix.isEmpty() && path.startsWith(prefix), Collections.emptyList(), source.id, detailAddress);
+        int rank = normalized.equals(query) ? 0 : normalized.startsWith(query + " ") ? 1 :
+                normalized.contains(query) ? 2 : 3;
+        return new IndexMatch(item, rank);
+    }
+
+    private static final Comparator<IndexMatch> INDEX_ORDER = Comparator
+            .comparingInt((IndexMatch match) -> match.rank)
+            .thenComparingInt(match -> match.title.title.length())
+            .thenComparing(match -> match.title.title)
+            .thenComparing(match -> match.title.id);
+
+    private static final class IndexMatch {
+        final Title title;
+        final int rank;
+
+        IndexMatch(Title title, int rank) {
+            this.title = title;
+            this.rank = rank;
+        }
+    }
+
+    private static void keepIndexMatch(PriorityQueue<IndexMatch> best, Set<String> kept, IndexMatch hit) {
+        if (kept.contains(hit.title.id)) return;
+        if (best.size() == MAX_INDEX_RESULTS) {
+            if (INDEX_ORDER.compare(hit, best.peek()) >= 0) return;
+            kept.remove(best.remove().title.id);
+        }
+        best.add(hit);
+        kept.add(hit.title.id);
+    }
+
+    private synchronized Title rememberCatalogTitle(Catalog source, Title resolved) throws IOException {
+        if (catalogs.get(source.id) != source) throw new IOException("Dieser Katalog wurde geändert.");
+        if (!titles.containsKey(resolved.id)) {
+            LinkedHashMap<String, Title> next = new LinkedHashMap<>(titles);
+            // Persist only metadata so future opens continue to resolve fresh media links.
+            next.put(resolved.id, new Title(resolved.id, resolved.title, resolved.poster, resolved.provider,
+                    resolved.description, resolved.isSeries, Collections.emptyList(), resolved.catalogId, resolved.address));
+            try {
+                store(next, catalogs);
+            } catch (JSONException error) {
+                throw new IOException("Der Katalogtitel konnte nicht gespeichert werden.", error);
+            }
+        }
+        return resolved;
+    }
+
     private static String normalize(String value) {
-        return Normalizer.normalize(value.toLowerCase(Locale.GERMAN), Normalizer.Form.NFD).replaceAll("\\p{M}", "");
+        return DIACRITIC.matcher(Normalizer.normalize(value.toLowerCase(Locale.GERMAN), Normalizer.Form.NFD))
+                .replaceAll("");
     }
 
     private synchronized List<Title> addTitles(List<Title> imported) throws IOException, JSONException {
@@ -1390,6 +1641,64 @@ final class TvLibrary {
         }
     }
 
+    private static final class IndexInput extends FilterInputStream {
+        private final long deadline;
+        private int size;
+
+        IndexInput(InputStream input, long deadline) {
+            super(input);
+            this.deadline = deadline;
+        }
+
+        @Override public int read() throws IOException {
+            checkTime();
+            int next = in.read();
+            if (next >= 0) add(1);
+            return next;
+        }
+
+        @Override public int read(byte[] bytes, int start, int count) throws IOException {
+            checkTime();
+            int read = in.read(bytes, start, Math.min(count, MAX_INDEX_BYTES + 1 - size));
+            if (read > 0) add(read);
+            return read;
+        }
+
+        private void add(int count) throws IOException {
+            size += count;
+            if (size > MAX_INDEX_BYTES) throw new IndexFailure("Der Suchindex ist größer als 14 MB.");
+            checkTime();
+        }
+
+        private void checkTime() throws IOException {
+            if (SystemClock.elapsedRealtime() >= deadline) throw new IndexFailure("Der Suchindex antwortet zu langsam.");
+        }
+    }
+
+    private static final class IndexFailure extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        IndexFailure(String message) {
+            super(message);
+        }
+
+        IndexFailure(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    private static HttpsURLConnection sourceConnection(URI uri, long deadline, String accept) throws IOException {
+        int time = remaining(deadline);
+        HttpsURLConnection connection = (HttpsURLConnection) uri.toURL().openConnection();
+        connection.setInstanceFollowRedirects(false);
+        connection.setUseCaches(false);
+        connection.setConnectTimeout(Math.min(5000, time));
+        connection.setReadTimeout(Math.min(6000, time));
+        connection.setRequestProperty("Accept", accept);
+        connection.setRequestProperty("User-Agent", "KinoTix Fire TV");
+        return connection;
+    }
+
     private static Reply download(URI input, Set<String> allowed, boolean detectMedia) throws IOException {
         return download(input, allowed, detectMedia, SystemClock.elapsedRealtime() + 12_000);
     }
@@ -1401,14 +1710,8 @@ final class TvLibrary {
             if (allowed != null && !allowed.contains(uri.getHost())) {
                 throw new IOException("Die Quelle verweist auf einen Host außerhalb des Katalogs.");
             }
-            int remaining = remaining(deadline);
-            HttpsURLConnection connection = (HttpsURLConnection) uri.toURL().openConnection();
-            connection.setInstanceFollowRedirects(false);
-            connection.setUseCaches(false);
-            connection.setConnectTimeout(Math.min(5000, remaining));
-            connection.setReadTimeout(Math.min(6000, remaining));
-            connection.setRequestProperty("Accept", "application/json, text/html, video/*, */*;q=0.5");
-            connection.setRequestProperty("User-Agent", "KinoTix Fire TV");
+            HttpsURLConnection connection = sourceConnection(uri, deadline,
+                    "application/json, text/html, video/*, */*;q=0.5");
             try {
                 int code = connection.getResponseCode();
                 if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
@@ -1614,6 +1917,16 @@ final class TvLibrary {
         return hosts;
     }
 
+    private static URI indexAddress(Object value, Set<String> allowed) {
+        if (!(value instanceof String)) return null;
+        try {
+            URI uri = https((String) value);
+            return allowed.contains(uri.getHost()) && uri.getRawQuery() == null ? uri : null;
+        } catch (IOException error) {
+            return null;
+        }
+    }
+
     private static Catalog portableCopy(Catalog input) throws IOException, JSONException {
         JSONObject source = input.config;
         URI base = https(input.origin);
@@ -1632,13 +1945,10 @@ final class TvLibrary {
             result.put(field, new JSONArray(sorted));
         }
         if (!source.isNull("index")) {
-            URI index = https(source.getString("index"));
-            Set<String> hosts = hostSet(result.getJSONArray("catalogHosts"));
-            hosts.add(base.getHost());
-            if (!hosts.contains(index.getHost()) || index.getRawQuery() != null) {
+            if (input.index == null) {
                 throw new IOException("Der Suchindex muss zum Katalog gehören.");
             }
-            result.put("index", index.toString());
+            result.put("index", input.index.toString());
         }
         JSONObject listing = portableRules(source.getJSONObject("listing"), "root", "items");
         JSONObject detail = portableRules(source.getJSONObject("detail"), "title", "description", "poster",

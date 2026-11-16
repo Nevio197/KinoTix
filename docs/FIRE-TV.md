@@ -2,9 +2,11 @@
 
 Die Android-App läuft eigenständig auf Fire OS ab Version 6 (Android API 25). Sie braucht Internetzugang für HTTPS-Quellen und GitHub-Updates. Die App nutzt die Android-Version von Fire OS. Vega OS verwendet ein eigenes App-Format.
 
-Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.6) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
+Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.7) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
 
 Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. Über **Quelle hinzufügen** akzeptiert KinoTix direkte HTTPS-Videos, Medienlisten und KinoTix-Kataloge mit statischen HTML-Quellen. Die lokale Dateiauswahl hängt von den verfügbaren Apps auf dem Gerät ab. Bei der Wiedergabe blendet sich die Leiste nach kurzer Zeit aus. Mit einer Richtungstaste lässt sie sich wieder einblenden. Die mittlere Taste pausiert die Wiedergabe und setzt sie fort.
+
+Die Suche zeigt sofort Treffer aus deiner Mediathek. Kataloge mit hinterlegtem Suchindex liefern weitere Treffer, sobald ihr Index geladen ist.
 
 ## Konto und Spielstand
 
@@ -43,4 +45,4 @@ Amazon beschreibt die ADB-Erstinstallation für Entwickler. Distribution über d
 
 ## Umfang dieser Ausgabe
 
-Der Katalogleser wertet HTML und eingebettete Video-Elemente als Daten aus. Skriptbasierte Einbettungen sowie die Fernsteuerung von einem zweiten Gerät stehen für Fire TV noch aus.
+Der Katalogleser wertet HTML, eingebettete Videoelemente und in Skripten enthaltene Videolinks als Daten aus. Die Fernsteuerung von einem zweiten Gerät steht für Fire TV noch aus.

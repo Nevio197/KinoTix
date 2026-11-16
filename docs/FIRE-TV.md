@@ -8,7 +8,9 @@ Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. 
 
 ## Konto und Spielstand
 
-Öffne **Einstellungen → Google-Konto → Mit Google anmelden** und wähle im Browser dasselbe Google-Konto wie am Mac. Nach der Rückkehr synchronisiert KinoTix Kataloge und den Wiedergabestand von **Mein Profil**. Über **Jetzt synchronisieren** lässt sich der Abgleich sofort anstoßen. Merkliste, Zusatzprofile und die Adressen einzeln importierter Videos bleiben auf dem jeweiligen Gerät. Für denselben direkten Videolink kannst du den Spielstand abrufen, sobald du die Adresse auch auf dem zweiten Gerät importiert hast.
+Ab Version 0.1.5 öffnest du **Einstellungen → Google-Konto → Mit Handy anmelden** und scannst den QR-Code. Melde dich auf dem Handy mit demselben Google-Konto wie am Mac an. Wähle am Fernseher **Mit diesem Konto verbinden**, wenn das angezeigte Konto stimmt. Der QR-Code ist fünf Minuten gültig. Die Anmeldung im TV-Browser steht ebenfalls im Kontomenü.
+
+Anschließend synchronisiert KinoTix Kataloge und den Wiedergabestand von **Mein Profil**. Über **Jetzt synchronisieren** lässt sich der Abgleich sofort anstoßen. Merkliste, Zusatzprofile und die Adressen einzeln importierter Videos bleiben auf dem jeweiligen Gerät. Für denselben direkten Videolink kannst du den Spielstand abrufen, sobald du die Adresse auch auf dem zweiten Gerät importiert hast.
 
 Im Gastmodus gespeicherte Kataloge kannst du im Kontomenü ausdrücklich ins Konto übernehmen. Nach dem Abmelden öffnet sich wieder die Gastmediathek.
 
@@ -26,6 +28,8 @@ Installiere JDK 17, die Android Platform 34 und Build-Tools 35.0.0. Setze `JAVA_
 - `firetv/build.sh` baut die Release-APK in `dist/firetv/`. Dafür müssen `KINOTIX_FIRETV_KEYSTORE`, `KINOTIX_FIRETV_KEY_ALIAS`, `KINOTIX_FIRETV_STORE_PASSWORD` und `KINOTIX_FIRETV_KEY_PASSWORD` gesetzt sein. Folgeversionen brauchen denselben Signierschlüssel. Schlüssel und Passwort gehören in die private Ablage des Herausgebers.
 - Die Google-Anmeldung verwendet `app/supabase.json` oder die unter `KINOTIX_FIRETV_ACCOUNT_CONFIG` angegebene Datei. Der Build übernimmt daraus nur die Projektadresse und den öffentlichen Publishable Key.
 - Erhöhe für ein Update `firetv/version.txt`, baue die APK und veröffentliche sie mit dem passenden Tag als Vorabversion in diesem Repository. Markiere sie dabei nicht als neueste allgemeine Version. Teste das Upgrade aus einer älteren signierten APK mit einem vorhandenen Wiedergabestand.
+
+Für die QR-Anmeldung im eigenen Supabase-Projekt wende die Migration `kinotix_tv_pairing` an und deploye die Edge Function `kinotix-tv-auth` mit der Einstellung aus `supabase/config.toml`. Ergänze unter **Authentication → URL Configuration → Redirect URLs** den Eintrag `https://<projekt>.supabase.co/functions/v1/kinotix-tv-auth/callback/*/*` zu den vorhandenen Adressen. [Supabase Redirect URLs](https://supabase.com/docs/guides/auth/redirect-urls)
 
 Amazon beschreibt die ADB-Erstinstallation für Entwickler. Distribution über den Amazon Appstore hat einen eigenen Veröffentlichungsweg. [Fire TV über ADB verbinden](https://developer.amazon.com/docs/fire-tv/connecting-adb-to-device.html)
 

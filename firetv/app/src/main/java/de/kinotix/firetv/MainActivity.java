@@ -31,6 +31,11 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.WriterException;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -926,7 +931,12 @@ public final class MainActivity extends Activity {
         TvAccount.State state = account.state();
         Button back = button("Zurück", this::showSettings);
         Button first = back;
-        if (state.connected) {
+        if (state.awaitingConfirmation) {
+            margin(body, text(state.email, 22, TEXT, true), 8);
+            Button confirm = button("Mit diesem Konto verbinden", account::confirmSignIn);
+            buttonRow(body, confirm, button("Abbrechen", account::cancelSignIn));
+            first = confirm;
+        } else if (state.connected) {
             margin(body, text(state.email, 20, TEXT, true), 4);
             syncReport = text(syncMessage(), 18, MUTED, false);
             syncReport.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -954,14 +964,18 @@ public final class MainActivity extends Activity {
             margin(body, text("Kataloge und Wiedergabestand von Mein Profil zwischen deinen Geräten synchronisieren.",
                 18, MUTED, false), 5);
             if (state.signingIn) {
+                if (state.qrUrl != null) showSignInCode(state.qrUrl);
                 Button cancel = button("Anmeldung abbrechen", account::cancelSignIn);
                 buttonRow(body, back, cancel);
                 first = cancel;
             } else {
-                Button signIn = button("Mit Google anmelden", account::signIn);
-                signIn.setEnabled(state.configured && !state.restoring && !state.signingOut);
-                buttonRow(body, back, signIn);
-                if (signIn.isEnabled()) first = signIn;
+                boolean ready = state.configured && !state.restoring && !state.signingOut;
+                Button phone = button("Mit Handy anmelden", account::signInQr);
+                Button browser = button("Im TV-Browser anmelden", account::signIn);
+                phone.setEnabled(ready);
+                browser.setEnabled(ready);
+                buttonRow(body, back, phone, browser);
+                if (ready) first = phone;
             }
         }
         if (state.message != null && !state.message.isEmpty()) {
@@ -970,6 +984,34 @@ public final class MainActivity extends Activity {
             margin(body, notice, 10);
         }
         focus(first);
+    }
+
+    private void showSignInCode(String url) {
+        int size = dp(248);
+        try {
+            BitMatrix qr = new QRCodeWriter().encode(url, BarcodeFormat.QR_CODE, size, size);
+            int width = qr.getWidth();
+            int height = qr.getHeight();
+            int[] pixels = new int[width * height];
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) pixels[y * width + x] = qr.get(x, y) ? Color.BLACK : Color.WHITE;
+            }
+            ImageView code = new ImageView(this);
+            code.setImageBitmap(Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888));
+            code.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            code.setContentDescription("QR-Code für die KinoTix-Anmeldung");
+            LinearLayout panel = row();
+            panel.addView(code, new LinearLayout.LayoutParams(size, size));
+            LinearLayout instructions = column();
+            instructions.setPadding(dp(24), 0, dp(16), 0);
+            instructions.addView(text("QR-Code mit dem Handy scannen", 23, TEXT, true));
+            margin(instructions, text("Melde dich auf dem Handy bei Google an und bestätige danach das Konto am Fernseher.",
+                18, MUTED, false), 10);
+            panel.addView(instructions, new LinearLayout.LayoutParams(0, -2, 1));
+            margin(body, panel, 16);
+        } catch (WriterException error) {
+            margin(body, text("Der QR-Code konnte nicht angezeigt werden. Starte die Anmeldung erneut.", 18, MUTED, false), 12);
+        }
     }
 
     private String syncMessage() {

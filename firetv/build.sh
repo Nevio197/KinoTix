@@ -59,21 +59,26 @@ else
     exit 1
 fi
 
-jsoup="$cache/jsoup-1.24.1.jar"
-jsoup_sha=fabbb4aaf7fb5340aed0613826ecd110427999d765d8e0367cedde2950d7097c
-verify_jsoup() {
-    printf '%s  %s\n' "$jsoup_sha" "$1" | shasum -a 256 -c --status
+download_jar() {
+    local destination=$1 url=$2 checksum=$3
+    local staged="$work/$(basename "$destination")"
+    if [[ ! -f "$destination" ]]; then
+        curl --proto '=https' --fail --silent --show-error --location --retry 2 "$url" -o "$staged"
+        printf '%s  %s\n' "$checksum" "$staged" | shasum -a 256 -c --status
+        mv "$staged" "$destination"
+    fi
+    printf '%s  %s\n' "$checksum" "$destination" | shasum -a 256 -c --status
 }
-if [[ ! -f "$jsoup" ]]; then
-    curl --proto '=https' --fail --silent --show-error --location --retry 2 \
-        'https://repo.maven.apache.org/maven2/org/jsoup/jsoup/1.24.1/jsoup-1.24.1.jar' -o "$work/jsoup.jar"
-    verify_jsoup "$work/jsoup.jar"
-    mv "$work/jsoup.jar" "$jsoup"
-fi
-verify_jsoup "$jsoup"
+jsoup="$cache/jsoup-1.24.1.jar"
+zxing="$cache/zxing-core-3.5.4.jar"
+download_jar "$jsoup" 'https://repo.maven.apache.org/maven2/org/jsoup/jsoup/1.24.1/jsoup-1.24.1.jar' \
+    fabbb4aaf7fb5340aed0613826ecd110427999d765d8e0367cedde2950d7097c
+download_jar "$zxing" 'https://repo.maven.apache.org/maven2/com/google/zxing/core/3.5.4/core-3.5.4.jar' \
+    71de5d89341b5fcf5dd89da7f44e84d825d0e084cdf3ec77c9abe26b0f0ceb13
 
 mkdir -p "$work/generated" "$work/classes" "$work/dex" "$work/assets/licenses"
 unzip -p "$jsoup" META-INF/jsoup/LICENSE > "$work/assets/licenses/jsoup.txt"
+cp "$project/firetv/licenses/zxing.txt" "$project/firetv/licenses/zxing-notice.txt" "$work/assets/licenses/"
 account_config=${KINOTIX_FIRETV_ACCOUNT_CONFIG:-"$project/app/supabase.json"}
 if [[ -e "$account_config" || -n "${KINOTIX_FIRETV_ACCOUNT_CONFIG:-}" ]]; then
     python3 - "$account_config" "$work/assets/supabase.json" <<'PY'
@@ -96,9 +101,9 @@ fi
     --version-code "$version_code" --version-name "$version" -o "$work/unsigned.apk" "$work/resources.zip"
 sources=()
 while IFS= read -r -d '' filename; do sources+=("$filename"); done < <(find "$src/java" "$work/generated" -name '*.java' -print0)
-"$jdk/bin/javac" --release 8 -encoding UTF-8 -classpath "$platform:$jsoup" -d "$work/classes" "${sources[@]}"
+"$jdk/bin/javac" --release 8 -encoding UTF-8 -classpath "$platform:$jsoup:$zxing" -d "$work/classes" "${sources[@]}"
 "$jdk/bin/jar" cf "$work/app.jar" -C "$work/classes" .
-JAVA_HOME="$jdk" "$tools/d8" --lib "$platform" --min-api 25 --output "$work/dex" "$work/app.jar" "$jsoup"
+JAVA_HOME="$jdk" "$tools/d8" --lib "$platform" --min-api 25 --output "$work/dex" "$work/app.jar" "$jsoup" "$zxing"
 for dex in "$work/dex/"*.dex; do zip -q -j "$work/unsigned.apk" "$dex"; done
 "$tools/zipalign" -f 4 "$work/unsigned.apk" "$work/aligned.apk"
 signer=(--ks "$store" --ks-key-alias "$alias" --ks-pass "$store_pass")

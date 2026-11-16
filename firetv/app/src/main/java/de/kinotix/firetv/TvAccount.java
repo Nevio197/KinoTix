@@ -35,8 +35,10 @@ import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -46,6 +48,7 @@ import javax.net.ssl.HttpsURLConnection;
 
 final class TvAccount implements AutoCloseable {
     private static final String AUTH = "/auth/v1/";
+    private static final String TV_AUTH = "/functions/v1/kinotix-tv-auth";
     private static final String SYNC_TABLE = "/rest/v1/kinotix_sync?";
     private static final String MERGE_RPC = "/rest/v1/rpc/kinotix_merge";
     private static final String LOOPBACK = "127.0.0.1";
@@ -58,8 +61,10 @@ final class TvAccount implements AutoCloseable {
     private static final int MAX_RESPONSE = 4 * 1024 * 1024;
     private static final int REQUEST_TIMEOUT_MS = 8_000;
     private static final int SIGN_IN_TIMEOUT_MS = 180_000;
+    private static final int QR_TIMEOUT_MS = 300_000;
+    private static final int QR_POLL_INTERVAL_MS = 2_500;
 
-    private enum Phase { UNCONFIGURED, SIGNED_OUT, RESTORING, SIGNING_IN, CONNECTED, SIGNING_OUT }
+    private enum Phase { UNCONFIGURED, SIGNED_OUT, RESTORING, SIGNING_IN, CONFIRMING, CONNECTED, SIGNING_OUT }
 
     interface Listener {
         void onAccount(State state);
@@ -69,21 +74,25 @@ final class TvAccount implements AutoCloseable {
         final boolean configured;
         final boolean connected;
         final boolean signingIn;
+        final boolean awaitingConfirmation;
         final boolean restoring;
         final boolean signingOut;
         final String id;
         final String email;
         final String message;
+        final String qrUrl;
 
-        private State(Phase phase, Session owner, String message) {
+        private State(Phase phase, Session owner, String message, String qrUrl) {
             configured = phase != Phase.UNCONFIGURED;
             connected = phase == Phase.CONNECTED;
-            signingIn = phase == Phase.SIGNING_IN;
+            awaitingConfirmation = phase == Phase.CONFIRMING;
+            signingIn = phase == Phase.SIGNING_IN || awaitingConfirmation;
             restoring = phase == Phase.RESTORING;
             signingOut = phase == Phase.SIGNING_OUT;
-            id = owner == null ? "" : owner.id;
+            id = owner == null || !connected ? "" : owner.id;
             email = owner == null ? "" : owner.email;
             this.message = message;
+            this.qrUrl = qrUrl;
         }
     }
 
@@ -113,6 +122,26 @@ final class TvAccount implements AutoCloseable {
         }
     }
 
+    private static final class PhoneCode {
+        final String code;
+        final long deadline;
+
+        PhoneCode(String code, long deadline) {
+            this.code = code;
+            this.deadline = deadline;
+        }
+    }
+
+    private static final class Confirmation {
+        final long deadline;
+        final CountDownLatch signal = new CountDownLatch(1);
+        boolean accepted;
+
+        Confirmation(long deadline) {
+            this.deadline = deadline;
+        }
+    }
+
     private static final class HttpError extends IOException {
         private static final long serialVersionUID = 1L;
         final int status;
@@ -123,10 +152,10 @@ final class TvAccount implements AutoCloseable {
         }
     }
 
-    private static final class BrowserError extends IOException {
+    private static final class SignInError extends IOException {
         private static final long serialVersionUID = 1L;
 
-        BrowserError(String message) {
+        SignInError(String message) {
             super(message);
         }
     }
@@ -142,6 +171,7 @@ final class TvAccount implements AutoCloseable {
     private volatile long generation;
     private volatile ServerSocket callbackServer;
     private volatile String browserIssue;
+    private volatile Confirmation confirmation;
     private Session session;
     private long signedInGeneration = -1;
     private boolean started;
@@ -152,8 +182,8 @@ final class TvAccount implements AutoCloseable {
         config = loadConfig(activity);
         credentials = new AtomicFile(new File(activity.getNoBackupFilesDir(), "kinotix-supabase-session"));
         state = config == null
-                ? new State(Phase.UNCONFIGURED, null, "Google-Anmeldung ist für diesen Build noch nicht eingerichtet.")
-                : new State(Phase.SIGNED_OUT, null, "");
+                ? new State(Phase.UNCONFIGURED, null, "Google-Anmeldung ist für diesen Build noch nicht eingerichtet.", null)
+                : new State(Phase.SIGNED_OUT, null, "", null);
     }
 
     State state() {
@@ -186,24 +216,39 @@ final class TvAccount implements AutoCloseable {
     }
 
     void signIn() {
+        signIn(false);
+    }
+
+    void signInQr() {
+        signIn(true);
+    }
+
+    private void signIn(boolean qr) {
         State status = state;
         if (closed || !status.configured || status.connected || status.signingIn || status.restoring || status.signingOut) return;
         long attempt = ++generation;
         browserIssue = null;
-        publish(Phase.SIGNING_IN, null, "Öffne die Google-Anmeldung im Browser …");
-        control.execute(() -> authorize(attempt));
+        publish(Phase.SIGNING_IN, null, qr ? "QR-Code wird geladen …" : "Öffne die Google-Anmeldung im Browser …");
+        control.execute(() -> authorize(attempt, qr));
     }
 
-    private void authorize(long attempt) {
+    private void authorize(long attempt, boolean qr) {
         Session verified = null;
+        String issuedAccess = null;
         boolean retained = false;
         try {
+            if (!isCurrent(attempt)) return;
             // Prove that secure storage is available before asking the user to sign in.
             secureKey(true);
             String verifier = randomValue();
-            String code = awaitCode(attempt, verifier);
+            PhoneCode phoneCode = qr ? awaitPhoneCode(attempt, verifier) : null;
+            String code = phoneCode != null ? phoneCode.code : awaitCode(attempt, verifier);
+            if (!isCurrent(attempt)) return;
             JSONObject data = new JSONObject().put("auth_code", code).put("code_verifier", verifier);
-            verified = verifySession(token("pkce", data), null);
+            JSONObject granted = token("pkce", data);
+            issuedAccess = tokenValue(granted, "access_token");
+            verified = verifySession(granted, null);
+            if (phoneCode != null) awaitConfirmation(attempt, verified, phoneCode.deadline);
             synchronized (SESSION_LOCK) {
                 if (!isCurrent(attempt)) return;
                 storeSession(verified);
@@ -217,14 +262,15 @@ final class TvAccount implements AutoCloseable {
             }
             Session owner = verified;
             post(attempt, () -> publish(Phase.CONNECTED, owner, ""));
-        } catch (BrowserError error) {
+        } catch (SignInError error) {
             post(attempt, () -> publish(Phase.SIGNED_OUT, null, error.getMessage()));
         } catch (GeneralSecurityException error) {
             post(attempt, () -> publish(Phase.SIGNED_OUT, null, "Der sichere Gerätespeicher ist gerade nicht verfügbar."));
         } catch (IOException | JSONException error) {
             post(attempt, () -> publish(Phase.SIGNED_OUT, null, SIGN_IN_ERROR));
         } finally {
-            if (verified != null && !retained) revoke(verified);
+            if (!retained && verified != null) revoke(verified);
+            else if (!retained && issuedAccess != null) revokeAccess(issuedAccess);
         }
     }
 
@@ -233,6 +279,7 @@ final class TvAccount implements AutoCloseable {
         long cancelled = generation;
         ++generation;
         closeCallback();
+        wakeConfirmation();
         control.execute(() -> {
             Session ended;
             synchronized (SESSION_LOCK) {
@@ -244,6 +291,16 @@ final class TvAccount implements AutoCloseable {
             revoke(ended);
         });
         publish(Phase.SIGNED_OUT, null, "Anmeldung abgebrochen.");
+    }
+
+    void confirmSignIn() {
+        Confirmation pending = confirmation;
+        if (closed || !state.awaitingConfirmation || pending == null) return;
+        if (SystemClock.elapsedRealtime() < pending.deadline) {
+            pending.accepted = true;
+            publish(Phase.SIGNING_IN, null, "Das Google-Konto wird verbunden …");
+        }
+        pending.signal.countDown();
     }
 
     void signOut() {
@@ -269,10 +326,106 @@ final class TvAccount implements AutoCloseable {
                 JSONObject refreshed = token("refresh_token", new JSONObject().put("refresh_token", ended.refresh));
                 access = tokenValue(refreshed, "access_token");
             }
-            api("POST", AUTH + "logout?scope=local", null, access);
+            revokeAccess(access);
         } catch (IOException | JSONException ignored) {
             // A failed network request must not restore the local sign-in.
         }
+    }
+
+    private void revokeAccess(String access) {
+        try {
+            api("POST", AUTH + "logout?scope=local", null, access);
+        } catch (IOException ignored) {
+            // A failed network request must not restore the local sign-in.
+        }
+    }
+
+    private PhoneCode awaitPhoneCode(long attempt, String verifier) throws IOException, JSONException, GeneralSecurityException {
+        long deadline = SystemClock.elapsedRealtime() + QR_TIMEOUT_MS;
+        String readToken = randomValue();
+        JSONObject start = new JSONObject()
+                .put("challenge", sha256Base64Url(verifier))
+                .put("readHash", sha256Base64Url(readToken));
+        JSONObject ticket = new JSONObject(api("POST", TV_AUTH + "/start", start, null));
+        String id = requiredString(ticket, "id");
+        String url = requiredString(ticket, "url");
+        long expiresIn = ticket.optLong("expiresIn", -1);
+        if (!validQrUrl(config.origin, id, url) || expiresIn <= 0 || expiresIn > QR_TIMEOUT_MS / 1000) {
+            throw new SignInError("Der Anmeldedienst hat keinen gültigen QR-Code geliefert.");
+        }
+        deadline = Math.min(deadline, SystemClock.elapsedRealtime() + expiresIn * 1000);
+        requireActiveQr(attempt, deadline);
+        post(attempt, () -> publish(Phase.SIGNING_IN, null, "Scanne den QR-Code mit deinem Handy.", url));
+        JSONObject poll = new JSONObject().put("id", id).put("readToken", readToken);
+        while (isCurrent(attempt)) {
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            if (remaining <= 0) break;
+            try {
+                TimeUnit.MILLISECONDS.sleep(Math.min(remaining, QR_POLL_INTERVAL_MS));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new SignInError("Anmeldung abgebrochen.");
+            }
+            requireActiveQr(attempt, deadline);
+            JSONObject response;
+            try {
+                response = new JSONObject(api("POST", TV_AUTH + "/poll", poll, null));
+            } catch (HttpError error) {
+                if (error.status == 429) continue;
+                if (error.status == 410) throw new SignInError("Der QR-Code ist abgelaufen.");
+                throw error;
+            }
+            requireActiveQr(attempt, deadline);
+            String status = response.optString("status");
+            if ("pending".equals(status)) continue;
+            if ("expired".equals(status)) break;
+            if ("ready".equals(status)) {
+                String code = requiredString(response, "code");
+                if (!code.matches("[A-Za-z0-9._~-]{8,512}")) throw new SignInError(SIGN_IN_ERROR);
+                post(attempt, () -> publish(Phase.SIGNING_IN, null, "Das Google-Konto wird geprüft …"));
+                return new PhoneCode(code, deadline);
+            }
+            throw new SignInError(SIGN_IN_ERROR);
+        }
+        requireActiveQr(attempt, deadline);
+        throw new SignInError("Der QR-Code ist abgelaufen.");
+    }
+
+    private static boolean validQrUrl(String origin, String id, String url) {
+        if (!id.matches("[A-Za-z0-9_-]{22}")) return false;
+        String prefix = origin + TV_AUTH + "/login/" + id + "/";
+        return url.startsWith(prefix) && url.substring(prefix.length()).matches("[A-Za-z0-9_-]{43}");
+    }
+
+    private void requireActiveQr(long attempt, long deadline) throws SignInError {
+        if (!isCurrent(attempt)) throw new SignInError("Anmeldung abgebrochen.");
+        if (SystemClock.elapsedRealtime() >= deadline) throw new SignInError("Der QR-Code ist abgelaufen.");
+    }
+
+    private void awaitConfirmation(long attempt, Session verified, long deadline) throws SignInError {
+        requireActiveQr(attempt, deadline);
+        Confirmation pending = new Confirmation(deadline);
+        confirmation = pending;
+        try {
+            post(attempt, () -> publish(Phase.CONFIRMING, verified, "Bestätige dieses Google-Konto am Fernseher."));
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            if (!isCurrent(attempt) || remaining <= 0
+                    || !pending.signal.await(remaining, TimeUnit.MILLISECONDS) || !pending.accepted) {
+                requireActiveQr(attempt, deadline);
+                throw new SignInError("Das Google-Konto wurde nicht bestätigt.");
+            }
+            requireActiveQr(attempt, deadline);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new SignInError("Anmeldung abgebrochen.");
+        } finally {
+            confirmation = null;
+        }
+    }
+
+    private void wakeConfirmation() {
+        Confirmation pending = confirmation;
+        if (pending != null) pending.signal.countDown();
     }
 
     /** Called by the sync worker with the account ID it is currently processing. */
@@ -388,21 +541,20 @@ final class TvAccount implements AutoCloseable {
 
     private String awaitCode(long attempt, String verifier) throws IOException, GeneralSecurityException {
         try (ServerSocket server = new ServerSocket(0, 6, InetAddress.getByName(LOOPBACK))) {
-            if (!isCurrent(attempt)) throw new BrowserError("Anmeldung abgebrochen.");
+            if (!isCurrent(attempt)) throw new SignInError("Anmeldung abgebrochen.");
             callbackServer = server;
             server.setSoTimeout(1000);
             String path = "/kinotix/auth/" + randomValue();
             String host = LOOPBACK + ":" + server.getLocalPort();
-            String challenge = base64Url(MessageDigest.getInstance("SHA-256").digest(verifier.getBytes(StandardCharsets.US_ASCII)));
             Uri target = Uri.parse(config.origin + AUTH + "authorize").buildUpon()
                     .appendQueryParameter("provider", "google")
                     .appendQueryParameter("redirect_to", "http://" + host + path)
-                    .appendQueryParameter("code_challenge", challenge)
+                    .appendQueryParameter("code_challenge", sha256Base64Url(verifier))
                     .appendQueryParameter("code_challenge_method", "s256").build();
             post(attempt, () -> openBrowser(target));
             long deadline = SystemClock.elapsedRealtime() + SIGN_IN_TIMEOUT_MS;
             while (isCurrent(attempt) && SystemClock.elapsedRealtime() < deadline) {
-                if (browserIssue != null) throw new BrowserError(browserIssue);
+                if (browserIssue != null) throw new SignInError(browserIssue);
                 Socket incoming;
                 try {
                     incoming = server.accept();
@@ -419,7 +571,7 @@ final class TvAccount implements AutoCloseable {
                     String code = parseCode(query);
                     if (code == null) {
                         respond(socket, "400 Bad Request", "Die Anmeldung wurde abgebrochen. Kehre zu KinoTix zurück.");
-                        throw new BrowserError("Die Google-Anmeldung wurde abgebrochen.");
+                        throw new SignInError("Die Google-Anmeldung wurde abgebrochen.");
                     }
                     try {
                         respond(socket, "200 OK", "Die Antwort ist angekommen. Drücke Zurück, um zu KinoTix zu wechseln.");
@@ -427,13 +579,13 @@ final class TvAccount implements AutoCloseable {
                         // The code was received even if the browser already closed its connection.
                     }
                     return code;
-                } catch (BrowserError error) {
+                } catch (SignInError error) {
                     throw error;
                 } catch (IOException ignored) {
                     // An incomplete request does not consume the single-use callback.
                 }
             }
-            throw new BrowserError("Die Google-Anmeldung ist abgelaufen.");
+            throw new SignInError("Die Google-Anmeldung ist abgelaufen.");
         } finally {
             callbackServer = null;
         }
@@ -642,9 +794,17 @@ final class TvAccount implements AutoCloseable {
         return Base64.encodeToString(bytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
     }
 
+    private static String sha256Base64Url(String value) throws GeneralSecurityException {
+        return base64Url(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.US_ASCII)));
+    }
+
     private void publish(Phase phase, Session owner, String message) {
+        publish(phase, owner, message, null);
+    }
+
+    private void publish(Phase phase, Session owner, String message, String qrUrl) {
         if (closed) return;
-        state = new State(phase, owner, message);
+        state = new State(phase, owner, message, qrUrl);
         listener.onAccount(state);
     }
 
@@ -672,6 +832,7 @@ final class TvAccount implements AutoCloseable {
     @Override public void close() {
         closed = true;
         closeCallback();
+        wakeConfirmation();
         control.shutdown();
     }
 }

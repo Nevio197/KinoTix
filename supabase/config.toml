@@ -1,0 +1,5 @@
+project_id = "kinotix"
+
+[functions.kinotix-tv-auth]
+# Before sign-in: the endpoints validate short-lived, purpose-specific pairing credentials.
+verify_jwt = false

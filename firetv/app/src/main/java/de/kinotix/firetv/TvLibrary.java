@@ -44,11 +44,20 @@ final class TvLibrary {
     private static final long MAX_DURATION = 86_400_000;
     private static final int MAX_INPUT = 2 * 1024 * 1024;
     private static final int MAX_SNAPSHOT = 12 * 1024 * 1024;
+    private static final int MAX_ACCOUNT_CATALOGS = 30;
+    private static final int MAX_REMOTE_PROGRESS = 5000;
+    private static final String PENDING = "sync-pending:";
+    private static final String CATALOG_CLOCK = "sync-clock:";
+    private static final String CATALOG_REFRESH = "sync-refresh:";
     private static final Pattern MEDIA_PATH = Pattern.compile(".*\\.(mp4|m4v|webm|mov|ogv|m3u8|mkv|ts)$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern CATALOG_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,30}");
     private static final Pattern LIST_ID = Pattern.compile("[\\w.-]{1,120}");
     private static final Pattern HOST = Pattern.compile("[a-z0-9.-]{1,253}");
+    private static final Pattern OWNER_ID = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern MEDIA_ID = Pattern.compile("media:[a-f0-9]{64}");
+    private static final Pattern TITLE_ID = Pattern.compile("catalog:([a-z0-9][a-z0-9-]{0,30}):([A-Za-z0-9_-]{2,1400})");
 
     static final class Title {
         final String id, title, poster, provider, description;
@@ -158,6 +167,7 @@ final class TvLibrary {
             catalogHosts.add(base.getHost());
             playerHosts = hostSet(data.optJSONArray("playerHosts"));
             mediaHosts = hostSet(data.getJSONArray("mediaHosts"));
+            config = data;
             listing = data.getJSONObject("listing");
             detail = data.getJSONObject("detail");
             selector(listing, "root", false);
@@ -167,24 +177,38 @@ final class TvLibrary {
             for (String field : new String[]{"description", "poster", "controls", "iframe"}) {
                 selector(detail, field, false);
             }
-            config = data;
         }
     }
 
     private final Context context;
+    private final String ownerKey;
     private final SharedPreferences library;
     private final SharedPreferences profileSettings;
     private final List<String> profiles = new ArrayList<>();
     private LinkedHashMap<String, Title> titles = new LinkedHashMap<>();
     private LinkedHashMap<String, Catalog> catalogs = new LinkedHashMap<>();
+    private final Map<String, RemoteProgress> downloaded = new LinkedHashMap<>();
     private String activeProfile;
+    private String activeSyncEpisodeId;
 
     TvLibrary(Context context) {
+        this(context, null);
+    }
+
+    TvLibrary(Context context, String ownerUuid) {
+        if (ownerUuid != null && !OWNER_ID.matcher(ownerUuid).matches()) {
+            throw new IllegalArgumentException("Ungültige KinoTix-Kennung.");
+        }
         this.context = context.getApplicationContext();
-        library = this.context.getSharedPreferences("kinotix_library", Context.MODE_PRIVATE);
-        profileSettings = this.context.getSharedPreferences("kinotix_profiles", Context.MODE_PRIVATE);
+        ownerKey = ownerUuid == null ? "" : "_" + digest(ownerUuid.toLowerCase(Locale.ROOT));
+        library = this.context.getSharedPreferences("kinotix_library" + ownerKey, Context.MODE_PRIVATE);
+        profileSettings = this.context.getSharedPreferences("kinotix_profiles" + ownerKey, Context.MODE_PRIVATE);
         profiles.add(FIRST_PROFILE);
         restore();
+    }
+
+    boolean isAccountLibrary() {
+        return !ownerKey.isEmpty();
     }
 
     private void restore() {
@@ -232,6 +256,14 @@ final class TvLibrary {
         return new ArrayList<>(catalogs.values());
     }
 
+    synchronized List<Catalog> catalogsNeedingRefresh() {
+        List<Catalog> result = new ArrayList<>();
+        for (Catalog catalog : catalogs.values()) {
+            if (library.getBoolean(CATALOG_REFRESH + catalog.id, false)) result.add(catalog);
+        }
+        return result;
+    }
+
     synchronized List<String> profiles() {
         return new ArrayList<>(profiles);
     }
@@ -262,27 +294,65 @@ final class TvLibrary {
     }
 
     synchronized Progress progress(Episode episode) {
-        return readProgress(profile().getString("progress:" + episode.id, ""));
+        Progress local = readProgress(profile().getString("progress:" + episode.id, ""));
+        RemoteProgress remote = FIRST_PROFILE.equals(activeProfile) && !episode.id.equals(activeSyncEpisodeId) ?
+                downloaded.get(episode.id) : null;
+        return local != null || remote == null ? local : remote.forEpisode(episode);
     }
 
     synchronized Progress latest(Title title) {
-        return readProgress(profile().getString("latest:" + title.id, ""));
+        Progress latest = readProgress(profile().getString("latest:" + title.id, ""));
+        if (!FIRST_PROFILE.equals(activeProfile) || downloaded.isEmpty() || title.catalogId != null) return latest;
+        for (Episode episode : title.episodes) {
+            if (episode.id.equals(activeSyncEpisodeId)) continue;
+            RemoteProgress remote = downloaded.get(episode.id);
+            if (remote != null && (latest == null || remote.updatedAt > latest.updatedAt)) {
+                latest = remote.forEpisode(episode);
+            }
+        }
+        return latest;
     }
 
     synchronized void saveProgress(Episode episode, long positionMs, long durationMs, boolean finished) {
         if (durationMs < 0 || durationMs > MAX_DURATION || positionMs < 0) return;
         long position = Math.min(positionMs, durationMs);
         SharedPreferences storage = profile();
+        boolean synchronize = isAccountLibrary() && FIRST_PROFILE.equals(activeProfile) && MEDIA_ID.matcher(episode.id).matches();
         try {
-            JSONObject value = new JSONObject().put("season", episode.season).put("episode", episode.episode)
-                    .put("position", position).put("duration", durationMs).put("at", System.currentTimeMillis())
-                    .put("finished", finished);
-            String row = value.toString();
-            storage.edit().putString("progress:" + episode.id, row)
-                    .putString("latest:" + episode.titleId, row).apply();
+            Progress prior = readProgress(storage.getString("progress:" + episode.id, ""));
+            RemoteProgress remote = synchronize ? downloaded.get(episode.id) : null;
+            long oldest = Math.max(prior == null ? 0 : prior.updatedAt, remote == null ? 0 : remote.updatedAt);
+            Progress latest = readProgress(storage.getString("latest:" + episode.titleId, ""));
+            if (latest != null) oldest = Math.max(oldest, latest.updatedAt);
+            long updatedAt = nextTimestamp(oldest);
+            Progress checkpoint = new Progress(episode.season, episode.episode, position, durationMs, updatedAt, finished);
+            SharedPreferences.Editor edit = storage.edit();
+            writeProgress(edit, episode, checkpoint, true);
+            if (synchronize) {
+                JSONObject value = new JSONObject().put("time", position / 1000d)
+                        .put("duration", durationMs / 1000d).put("finished", finished);
+                Title title = titles.get(episode.titleId);
+                if (title != null && title.catalogId != null && episode.id.equals(catalogEpisodeId(
+                        title.id, episode.season, episode.episode))) {
+                    value.put("catalog", new JSONObject().put("url", title.id).put("title", title.title)
+                            .put("season", episode.season).put("episode", episode.episode)
+                            .put("isSeries", title.isSeries));
+                }
+                edit.putString(PENDING + episode.id, syncRow("progress", episode.id, updatedAt, value).toString());
+            }
+            edit.apply();
         } catch (JSONException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    private static void writeProgress(SharedPreferences.Editor edit, Episode episode, Progress checkpoint,
+                                      boolean latest) throws JSONException {
+        String row = new JSONObject().put("season", checkpoint.season).put("episode", checkpoint.episode)
+                .put("position", checkpoint.positionMs).put("duration", checkpoint.durationMs)
+                .put("at", checkpoint.updatedAt).put("finished", checkpoint.finished).toString();
+        edit.putString("progress:" + episode.id, row);
+        if (latest) edit.putString("latest:" + episode.titleId, row);
     }
 
     private static Progress readProgress(String value) {
@@ -308,7 +378,314 @@ final class TvLibrary {
     }
 
     private SharedPreferences profile() {
-        return context.getSharedPreferences("kinotix_profile_" + digest(activeProfile), Context.MODE_PRIVATE);
+        return profile(activeProfile);
+    }
+
+    private SharedPreferences profile(String name) {
+        return context.getSharedPreferences("kinotix_profile_" + digest(name) + ownerKey, Context.MODE_PRIVATE);
+    }
+
+    synchronized JSONArray pendingSyncRows(int limit) {
+        if (!isAccountLibrary() || limit <= 0) return new JSONArray();
+        List<JSONObject> pending = new ArrayList<>();
+        collectPending(library, pending);
+        collectPending(profile(FIRST_PROFILE), pending);
+        pending.sort(Comparator.comparingLong(row -> row.optLong("updated_at")));
+        JSONArray batch = new JSONArray();
+        for (int i = 0; i < pending.size() && i < Math.min(limit, 1000); i++) batch.put(pending.get(i));
+        return batch;
+    }
+
+    private static void collectPending(SharedPreferences storage, List<JSONObject> result) {
+        for (Map.Entry<String, ?> entry : storage.getAll().entrySet()) {
+            if (entry.getKey().startsWith(PENDING) && entry.getValue() instanceof String) {
+                JSONObject row = readObject((String) entry.getValue());
+                if (row != null) result.add(row);
+            }
+        }
+    }
+
+    synchronized void acknowledgeSyncRows(JSONArray sent) {
+        if (!isAccountLibrary() || sent == null) return;
+        SharedPreferences primary = profile(FIRST_PROFILE);
+        SharedPreferences.Editor catalogEdit = library.edit(), progressEdit = primary.edit();
+        for (int index = 0; index < sent.length() && index < 1000; index++) {
+            JSONObject row = sent.optJSONObject(index);
+            if (row == null) continue;
+            String key = PENDING + row.optString("item_id", "");
+            boolean catalog = "catalog".equals(row.optString("kind", ""));
+            SharedPreferences storage = catalog ? library : primary;
+            JSONObject pending = readObject(storage.getString(key, ""));
+            if (pending != null && pending.optLong("updated_at") == row.optLong("updated_at")) {
+                (catalog ? catalogEdit : progressEdit).remove(key);
+            }
+        }
+        catalogEdit.apply();
+        progressEdit.apply();
+    }
+
+    synchronized boolean applySyncRows(JSONArray catalogRows, JSONArray progressRows, String activeEpisodeId)
+            throws IOException, JSONException {
+        if (!isAccountLibrary()) return false;
+        activeSyncEpisodeId = activeEpisodeId;
+        boolean catalogsChanged = applyCatalogRows(catalogRows);
+        return applyProgressRows(progressRows, activeEpisodeId) || catalogsChanged;
+    }
+
+    private boolean applyCatalogRows(JSONArray rows) throws IOException, JSONException {
+        if (rows == null || rows.length() == 0) return false;
+        LinkedHashMap<String, Catalog> next = new LinkedHashMap<>(catalogs);
+        LinkedHashMap<String, Title> items = new LinkedHashMap<>(titles);
+        Map<String, Long> clocks = new LinkedHashMap<>();
+        SharedPreferences.Editor edit = library.edit();
+        boolean changed = false;
+        for (int i = 0; i < rows.length() && i < 100; i++) {
+            JSONObject row = rows.optJSONObject(i);
+            if (row == null || !"catalog".equals(row.optString("kind"))) continue;
+            String id = row.optString("item_id", "");
+            long timestamp = syncTimestamp(row);
+            JSONObject value = row.optJSONObject("value");
+            if (!CATALOG_ID.matcher(id).matches() || timestamp <= 0 || value == null ||
+                    timestamp <= clocks.getOrDefault(id, library.getLong(CATALOG_CLOCK + id, 0))) continue;
+            Catalog prior = next.get(id);
+            Catalog source = null;
+            if (!Boolean.TRUE.equals(value.opt("removed"))) {
+                JSONObject descriptor = value.optJSONObject("source");
+                if (descriptor == null || (prior == null && next.size() >= catalogLimit())) continue;
+                try {
+                    source = portableCopy(new Catalog(descriptor));
+                    if (!source.id.equals(id)) continue;
+                } catch (IOException | JSONException | IllegalArgumentException invalid) {
+                    continue;
+                }
+            }
+            clocks.put(id, timestamp);
+            edit.putLong(CATALOG_CLOCK + id, timestamp);
+            if (source == null) {
+                next.remove(id);
+                edit.remove(CATALOG_REFRESH + id);
+            } else if (prior == null || !prior.config.toString().equals(source.config.toString())) {
+                next.put(id, source);
+                edit.putBoolean(CATALOG_REFRESH + id, true);
+            } else {
+                continue;
+            }
+            if (prior != null || source != null) {
+                items.entrySet().removeIf(item -> id.equals(item.getValue().catalogId));
+                changed = true;
+            }
+        }
+        if (!clocks.isEmpty()) {
+            if (changed) store(items, next, edit);
+            else edit.apply();
+        }
+        return changed;
+    }
+
+    private boolean applyProgressRows(JSONArray rows, String activeEpisodeId) throws IOException, JSONException {
+        if (rows == null || rows.length() == 0) return false;
+        SharedPreferences primary = profile(FIRST_PROFILE);
+        SharedPreferences.Editor edit = primary.edit();
+        Map<String, Episode> episodes = new LinkedHashMap<>();
+        for (Title title : titles.values()) {
+            for (Episode episode : title.episodes) episodes.put(episode.id, episode);
+        }
+        Map<String, Progress> checkpoints = new LinkedHashMap<>(), latest = new LinkedHashMap<>();
+        LinkedHashMap<String, Title> items = new LinkedHashMap<>(titles);
+        boolean changed = false;
+        for (int i = 0; i < rows.length() && i < MAX_REMOTE_PROGRESS; i++) {
+            RemoteProgress remote = RemoteProgress.parse(rows.optJSONObject(i));
+            if (remote == null) continue;
+            RemoteProgress cached = downloaded.get(remote.id);
+            if (cached == null || cached.updatedAt < remote.updatedAt) downloaded.put(remote.id, remote);
+            if (remote.id.equals(activeEpisodeId)) continue;
+            Episode episode = episodes.get(remote.id);
+            CatalogReference reference = remote.catalog;
+            if (reference != null && catalogs.containsKey(reference.catalogId)) {
+                if (!items.containsKey(reference.id)) {
+                    Catalog source = catalogs.get(reference.catalogId);
+                    String address = address(reference.path, https(source.origin));
+                    if (address == null) continue;
+                    items.put(reference.id, new Title(reference.id, reference.title, "", source.name, "",
+                            reference.series, Collections.emptyList(), source.id, address));
+                }
+                episode = new Episode(remote.id, reference.id, reference.season, reference.episode,
+                        Collections.emptyList(), Collections.emptyMap(), Collections.emptyList());
+            }
+            if (episode == null) continue;
+            Progress existing = checkpoints.get(episode.id);
+            if (existing == null) existing = readProgress(primary.getString("progress:" + episode.id, ""));
+            if (existing != null && existing.updatedAt >= remote.updatedAt) continue;
+            Progress last = latest.get(episode.titleId);
+            if (last == null) last = readProgress(primary.getString("latest:" + episode.titleId, ""));
+            Progress checkpoint = remote.forEpisode(episode);
+            boolean newest = last == null || last.updatedAt <= checkpoint.updatedAt;
+            writeProgress(edit, episode, checkpoint, newest);
+            checkpoints.put(episode.id, checkpoint);
+            if (newest) latest.put(episode.titleId, checkpoint);
+            changed = true;
+        }
+        while (downloaded.size() > MAX_REMOTE_PROGRESS) {
+            downloaded.remove(downloaded.keySet().iterator().next());
+        }
+        boolean added = items.size() > titles.size();
+        if (added) store(items, catalogs);
+        if (changed) edit.apply();
+        return changed || added;
+    }
+
+    int copyGuestCatalogs(TvLibrary guest) throws IOException, JSONException {
+        if (!isAccountLibrary() || guest == null || guest.isAccountLibrary()) return 0;
+        List<Catalog> offered;
+        List<Title> imported;
+        synchronized (guest) {
+            offered = guest.catalogs();
+            imported = guest.titles();
+        }
+        synchronized (this) {
+            LinkedHashMap<String, Catalog> next = new LinkedHashMap<>(catalogs);
+            LinkedHashMap<String, Title> items = new LinkedHashMap<>(titles);
+            SharedPreferences.Editor edit = library.edit();
+            List<String> added = new ArrayList<>();
+            for (Catalog source : offered) {
+                if (next.size() >= catalogLimit()) break;
+                if (next.containsKey(source.id) || library.contains(CATALOG_CLOCK + source.id)) continue;
+                Catalog portable = portableCopy(source);
+                next.put(portable.id, portable);
+                queueCatalog(edit, portable.id, portable);
+                added.add(source.id);
+            }
+            if (added.isEmpty()) return 0;
+            for (Title title : imported) if (added.contains(title.catalogId)) items.put(title.id, title);
+            store(items, next, edit);
+            return added.size();
+        }
+    }
+
+    private void queueCatalog(SharedPreferences.Editor edit, String id, Catalog source)
+            throws JSONException, IOException {
+        if (!isAccountLibrary()) return;
+        long timestamp = nextTimestamp(library.getLong(CATALOG_CLOCK + id, 0));
+        JSONObject value = source == null ? new JSONObject().put("removed", true) :
+                new JSONObject().put("source", source.config);
+        if (value.toString().getBytes(StandardCharsets.UTF_8).length > 16_000) {
+            throw new IOException("Die Katalogdatei ist zu groß für die Synchronisierung.");
+        }
+        edit.putLong(CATALOG_CLOCK + id, timestamp)
+                .putString(PENDING + id, syncRow("catalog", id, timestamp, value).toString());
+    }
+
+    private static JSONObject syncRow(String kind, String id, long at, JSONObject value) throws JSONException {
+        return new JSONObject().put("kind", kind).put("item_id", id).put("updated_at", at).put("value", value);
+    }
+
+    private static JSONObject readObject(String encoded) {
+        try {
+            return new JSONObject(encoded);
+        } catch (JSONException invalid) {
+            return null;
+        }
+    }
+
+    private static long nextTimestamp(long previous) {
+        return Math.max(System.currentTimeMillis(), previous + 1);
+    }
+
+    private static long syncTimestamp(JSONObject row) {
+        Object input = row.opt("updated_at");
+        if (!(input instanceof Number)) return -1;
+        long at = ((Number) input).longValue();
+        return at > 0 && at <= System.currentTimeMillis() + 300_000 &&
+                ((Number) input).doubleValue() == at ? at : -1;
+    }
+
+    private static String catalogEpisodeId(String titleId, int season, int episode) {
+        return "media:" + digest(titleId + "|" + season + "|" + episode);
+    }
+
+    private static final class CatalogReference {
+        final String id, catalogId, path, title;
+        final int season, episode;
+        final boolean series;
+
+        private CatalogReference(String id, String catalogId, String path, String title, int season,
+                                 int episode, boolean series) {
+            this.id = id;
+            this.catalogId = catalogId;
+            this.path = path;
+            this.title = title;
+            this.season = season;
+            this.episode = episode;
+            this.series = series;
+        }
+
+        static CatalogReference parse(JSONObject row, String episodeId) {
+            if (row == null) return null;
+            String id = row.optString("url", "");
+            java.util.regex.Matcher match = TITLE_ID.matcher(id);
+            if (!match.matches()) return null;
+            String encoded = match.group(2);
+            int flags = Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP;
+            try {
+                String path = new String(Base64.decode(encoded, flags), StandardCharsets.UTF_8);
+                if (!path.startsWith("/") || path.startsWith("//") || !encoded.equals(Base64.encodeToString(
+                        path.getBytes(StandardCharsets.UTF_8), flags))) return null;
+                for (int i = 0; i < path.length(); i++) {
+                    char value = path.charAt(i);
+                    if (value <= 0x20 || value == '?' || value == '#' || value == '\\') return null;
+                }
+                Object titleValue = row.opt("title");
+                if (!(titleValue instanceof String)) return null;
+                String title = ((String) titleValue).trim();
+                int season = exactInt(row.opt("season"), 1, 999), episode = exactInt(row.opt("episode"), 1, 9999);
+                if (title.isEmpty() || title.length() > 180 || season < 0 || episode < 0 ||
+                        !episodeId.equals(catalogEpisodeId(id, season, episode))) return null;
+                return new CatalogReference(id, match.group(1), path, title, season, episode,
+                        Boolean.TRUE.equals(row.opt("isSeries")));
+            } catch (IllegalArgumentException invalid) {
+                return null;
+            }
+        }
+    }
+
+    private static final class RemoteProgress {
+        final String id;
+        final long position, duration, updatedAt;
+        final boolean finished;
+        final CatalogReference catalog;
+
+        private RemoteProgress(String id, long position, long duration, long updatedAt, boolean finished,
+                               CatalogReference catalog) {
+            this.id = id;
+            this.position = position;
+            this.duration = duration;
+            this.updatedAt = updatedAt;
+            this.finished = finished;
+            this.catalog = catalog;
+        }
+
+        static RemoteProgress parse(JSONObject row) {
+            if (row == null || !"progress".equals(row.optString("kind"))) return null;
+            String id = row.optString("item_id", "");
+            long at = syncTimestamp(row);
+            JSONObject value = row.optJSONObject("value");
+            if (at <= 0 || !MEDIA_ID.matcher(id).matches() || value == null) return null;
+            Object positionValue = value.opt("time"), durationValue = value.opt("duration");
+            Object status = value.opt("finished");
+            if (!(positionValue instanceof Number) || !(durationValue instanceof Number) || !(status instanceof Boolean)) {
+                return null;
+            }
+            double position = ((Number) positionValue).doubleValue(), duration = ((Number) durationValue).doubleValue();
+            if (!(position >= 0 && duration >= 0 && duration <= MAX_DURATION / 1000d && position <= duration + .5)) {
+                return null;
+            }
+            return new RemoteProgress(id, Math.round(Math.min(position, duration) * 1000), Math.round(duration * 1000),
+                    at, (Boolean) status, CatalogReference.parse(value.optJSONObject("catalog"), id));
+        }
+
+        Progress forEpisode(Episode episode) {
+            return new Progress(episode.season, episode.episode, position, duration, updatedAt, finished);
+        }
     }
 
     List<Title> importUrl(String input) throws IOException, JSONException {
@@ -466,14 +843,19 @@ final class TvLibrary {
     }
 
     private List<Title> importCatalog(Catalog source) throws IOException, JSONException {
+        if (isAccountLibrary()) source = portableCopy(source);
         List<Title> found = listing(source);
         synchronized (this) {
             Catalog previous = catalogs.get(source.id);
             if (previous != null && !previous.origin.equals(source.origin)) {
                 throw new IOException("Ein anderer Katalog verwendet diese Kennung bereits.");
             }
-            if (previous == null && catalogs.size() >= 15) throw new IOException("Bis zu 15 Kataloge sind möglich.");
-            replaceCatalog(source, found);
+            if (previous == null && catalogs.size() >= catalogLimit()) {
+                throw new IOException("Bis zu " + catalogLimit() + " Kataloge sind möglich.");
+            }
+            SharedPreferences.Editor edit = library.edit().remove(CATALOG_REFRESH + source.id);
+            queueCatalog(edit, source.id, source);
+            replaceCatalog(source, found, edit);
         }
         return found;
     }
@@ -482,23 +864,48 @@ final class TvLibrary {
         List<Title> found = listing(source);
         synchronized (this) {
             if (catalogs.get(source.id) != source) throw new IOException("Dieser Katalog wurde geändert.");
-            replaceCatalog(source, found);
+            replaceCatalog(source, found, library.edit().remove(CATALOG_REFRESH + source.id));
         }
         return found;
     }
 
-    private void replaceCatalog(Catalog source, List<Title> found) throws JSONException, IOException {
+    private void replaceCatalog(Catalog source, List<Title> found, SharedPreferences.Editor edit)
+            throws JSONException, IOException {
         LinkedHashMap<String, Catalog> nextCatalogs = new LinkedHashMap<>(catalogs);
         LinkedHashMap<String, Title> nextTitles = withoutCatalog(source.id);
+        LinkedHashMap<String, Title> listing = new LinkedHashMap<>();
+        for (Title title : found) listing.put(title.id, title);
+        for (Title title : titles.values()) {
+            if (source.id.equals(title.catalogId) && !listing.containsKey(title.id) && retainTitle(title)) {
+                nextTitles.put(title.id, title);
+            }
+        }
         nextCatalogs.put(source.id, source);
-        for (Title title : found) nextTitles.put(title.id, title);
-        store(nextTitles, nextCatalogs);
+        nextTitles.putAll(listing);
+        store(nextTitles, nextCatalogs, edit);
     }
 
     synchronized void removeCatalog(Catalog source) throws IOException, JSONException {
+        if (catalogs.get(source.id) != source) throw new IOException("Dieser Katalog wurde geändert.");
         LinkedHashMap<String, Catalog> next = new LinkedHashMap<>(catalogs);
         next.remove(source.id);
-        store(withoutCatalog(source.id), next);
+        SharedPreferences.Editor edit = library.edit().remove(CATALOG_REFRESH + source.id);
+        queueCatalog(edit, source.id, null);
+        store(withoutCatalog(source.id), next, edit);
+    }
+
+    private int catalogLimit() {
+        return isAccountLibrary() ? MAX_ACCOUNT_CATALOGS : 15;
+    }
+
+    private boolean retainTitle(Title title) {
+        for (String name : profiles) {
+            SharedPreferences profile = profile(name);
+            if (profile.contains("latest:" + title.id) || profile.getBoolean("saved:" + title.id, false)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private LinkedHashMap<String, Title> withoutCatalog(String id) {
@@ -589,7 +996,7 @@ final class TvLibrary {
         }
         List<Episode> found = new ArrayList<>();
         for (EpisodeLinks row : episodes.values()) {
-            String id = "media:" + digest(title.id + "|" + row.season + "|" + row.episode);
+            String id = catalogEpisodeId(title.id, row.season, row.episode);
             found.add(new Episode(id, title.id, row.season, row.episode, Collections.emptyList(),
                     Collections.emptyMap(), row.links));
         }
@@ -792,13 +1199,18 @@ final class TvLibrary {
 
     private void store(LinkedHashMap<String, Title> nextTitles, LinkedHashMap<String, Catalog> nextCatalogs)
             throws IOException, JSONException {
+        store(nextTitles, nextCatalogs, library.edit());
+    }
+
+    private void store(LinkedHashMap<String, Title> nextTitles, LinkedHashMap<String, Catalog> nextCatalogs,
+                       SharedPreferences.Editor edit) throws IOException, JSONException {
         JSONArray storedTitles = new JSONArray();
         for (Title title : nextTitles.values()) storedTitles.put(storeTitle(title));
         JSONArray storedCatalogs = new JSONArray();
         for (Catalog catalog : nextCatalogs.values()) storedCatalogs.put(catalog.config);
         String encoded = new JSONObject().put("titles", storedTitles).put("catalogs", storedCatalogs).toString();
         if (encoded.length() > MAX_SNAPSHOT) throw new IOException("Die Mediathek hat ihre Speichergrenze erreicht.");
-        library.edit().putString("content", encoded).apply();
+        edit.putString("content", encoded).apply();
         titles = nextTitles;
         catalogs = nextCatalogs;
     }
@@ -984,11 +1396,62 @@ final class TvLibrary {
         if (array == null) return hosts;
         if (array.length() > 20) throw new IOException("Die Hostliste des Katalogs ist zu lang.");
         for (int index = 0; index < array.length(); index++) {
-            String host = array.getString(index).toLowerCase(Locale.ROOT);
+            Object value = array.opt(index);
+            if (!(value instanceof String)) throw new IOException("Die Hostliste des Katalogs ist ungültig.");
+            String host = ((String) value).toLowerCase(Locale.ROOT);
             if (!HOST.matcher(host).matches()) throw new IOException("Die Hostliste des Katalogs ist ungültig.");
             hosts.add(host);
         }
         return hosts;
+    }
+
+    private static Catalog portableCopy(Catalog input) throws IOException, JSONException {
+        JSONObject source = input.config;
+        URI base = https(input.origin);
+        JSONObject result = new JSONObject().put("version", 1).put("id", source.getString("id"))
+                .put("name", requiredText(source, "name", 80))
+                .put("origin", base.toString().substring(0, base.toString().length() - 1));
+        for (String field : new String[]{"catalogHosts", "playerHosts", "mediaHosts", "resourceHosts"}) {
+            Object raw = source.opt(field);
+            if (raw != null && raw != JSONObject.NULL && !(raw instanceof JSONArray)) {
+                throw new IOException("Die Hostliste des Katalogs ist ungültig.");
+            }
+            JSONArray hosts = raw instanceof JSONArray ? (JSONArray) raw : null;
+            Set<String> allowed = hostSet(hosts);
+            List<String> sorted = new ArrayList<>(allowed);
+            Collections.sort(sorted);
+            result.put(field, new JSONArray(sorted));
+        }
+        if (!source.isNull("index")) {
+            URI index = https(source.getString("index"));
+            Set<String> hosts = hostSet(result.getJSONArray("catalogHosts"));
+            hosts.add(base.getHost());
+            if (!hosts.contains(index.getHost()) || index.getRawQuery() != null) {
+                throw new IOException("Der Suchindex muss zum Katalog gehören.");
+            }
+            result.put("index", index.toString());
+        }
+        JSONObject listing = portableRules(source.getJSONObject("listing"), "root", "items");
+        JSONObject detail = portableRules(source.getJSONObject("detail"), "title", "description", "poster",
+                "imdb", "groups", "controls", "episodeAttribute", "sourceAttribute", "iframe", "seriesPrefix",
+                "embedPattern");
+        JSONObject player = portableRules(source.optJSONObject("player"), "variants");
+        return new Catalog(result.put("listing", listing).put("detail", detail).put("player", player));
+    }
+
+    private static JSONObject portableRules(JSONObject input, String... keys) throws IOException, JSONException {
+        JSONObject result = new JSONObject();
+        if (input == null) return result;
+        for (String key : keys) {
+            Object raw = input.opt(key);
+            if (raw == null || raw == JSONObject.NULL) continue;
+            if (!(raw instanceof String) || ((String) raw).length() > 450) {
+                throw new IOException("Der Katalog enthält eine ungültige Auswahlregel.");
+            }
+            String rule = ((String) raw).trim();
+            if (!rule.isEmpty()) result.put(key, rule);
+        }
+        return result;
     }
 
     private static String selector(JSONObject object, String key, boolean required) throws IOException {

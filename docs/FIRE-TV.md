@@ -2,9 +2,15 @@
 
 Die Android-App läuft eigenständig auf Fire OS ab Version 6 (Android API 25). Sie braucht Internetzugang für HTTPS-Quellen und GitHub-Updates. Die App nutzt die Android-Version von Fire OS. Vega OS verwendet ein eigenes App-Format.
 
-Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.3) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
+Die aktuelle [Fire-TV-Vorabversion](https://github.com/Nevio197/KinoTix/releases/tag/firetv-v0.1.4) enthält die APK für die Erstinstallation. Unter Fire OS 7 funktioniert die APK-Signaturprüfung ab KinoTix 0.1.2.
 
-Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. Über **Quelle hinzufügen** akzeptiert KinoTix direkte HTTPS-Videos, Medienlisten und KinoTix-Kataloge mit statischen HTML-Quellen. Die lokale Dateiauswahl hängt von den verfügbaren Apps auf dem Gerät ab. Wiedergabestand, Merkliste und Profile bleiben auf dem Fire TV gespeichert. Bei der Wiedergabe blendet sich die Leiste nach kurzer Zeit aus. Mit einer Richtungstaste lässt sie sich wieder einblenden. Die mittlere Taste pausiert die Wiedergabe und setzt sie fort.
+Mit dem Steuerkreuz erreichst du Mediathek, Merkliste, Suche und Einstellungen. Über **Quelle hinzufügen** akzeptiert KinoTix direkte HTTPS-Videos, Medienlisten und KinoTix-Kataloge mit statischen HTML-Quellen. Die lokale Dateiauswahl hängt von den verfügbaren Apps auf dem Gerät ab. Bei der Wiedergabe blendet sich die Leiste nach kurzer Zeit aus. Mit einer Richtungstaste lässt sie sich wieder einblenden. Die mittlere Taste pausiert die Wiedergabe und setzt sie fort.
+
+## Konto und Spielstand
+
+Öffne **Einstellungen → Google-Konto → Mit Google anmelden** und wähle im Browser dasselbe Google-Konto wie am Mac. Nach der Rückkehr synchronisiert KinoTix Kataloge und den Wiedergabestand von **Mein Profil**. Über **Jetzt synchronisieren** lässt sich der Abgleich sofort anstoßen. Merkliste, Zusatzprofile und die Adressen einzeln importierter Videos bleiben auf dem jeweiligen Gerät. Für denselben direkten Videolink kannst du den Spielstand abrufen, sobald du die Adresse auch auf dem zweiten Gerät importiert hast.
+
+Im Gastmodus gespeicherte Kataloge kannst du im Kontomenü ausdrücklich ins Konto übernehmen. Nach dem Abmelden öffnet sich wieder die Gastmediathek.
 
 ## Updates
 
@@ -18,6 +24,7 @@ Installiere JDK 17, die Android Platform 34 und Build-Tools 35.0.0. Setze `JAVA_
 
 - `firetv/build.sh --test` baut eine lokal signierte Test-APK für Emulatoren und Debugging.
 - `firetv/build.sh` baut die Release-APK in `dist/firetv/`. Dafür müssen `KINOTIX_FIRETV_KEYSTORE`, `KINOTIX_FIRETV_KEY_ALIAS`, `KINOTIX_FIRETV_STORE_PASSWORD` und `KINOTIX_FIRETV_KEY_PASSWORD` gesetzt sein. Folgeversionen brauchen denselben Signierschlüssel. Schlüssel und Passwort gehören in die private Ablage des Herausgebers.
+- Die Google-Anmeldung verwendet `app/supabase.json` oder die unter `KINOTIX_FIRETV_ACCOUNT_CONFIG` angegebene Datei. Der Build übernimmt daraus nur die Projektadresse und den öffentlichen Publishable Key.
 - Erhöhe für ein Update `firetv/version.txt`, baue die APK und veröffentliche sie mit dem passenden Tag als Vorabversion in diesem Repository. Markiere sie dabei nicht als neueste allgemeine Version. Teste das Upgrade aus einer älteren signierten APK mit einem vorhandenen Wiedergabestand.
 
 Amazon beschreibt die ADB-Erstinstallation für Entwickler. Distribution über den Amazon Appstore hat einen eigenen Veröffentlichungsweg. [Fire TV über ADB verbinden](https://developer.amazon.com/docs/fire-tv/connecting-adb-to-device.html)
@@ -30,4 +37,4 @@ Amazon beschreibt die ADB-Erstinstallation für Entwickler. Distribution über d
 
 ## Umfang dieser Ausgabe
 
-Der Katalogleser wertet HTML und eingebettete Video-Elemente als Daten aus. Skriptbasierte Einbettungen, geräteübergreifender Kontoabgleich sowie Fernsteuerung von einem zweiten Gerät stehen für Fire TV noch aus.
+Der Katalogleser wertet HTML und eingebettete Video-Elemente als Daten aus. Skriptbasierte Einbettungen sowie die Fernsteuerung von einem zweiten Gerät stehen für Fire TV noch aus.

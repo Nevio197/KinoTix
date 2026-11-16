@@ -43,6 +43,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,7 +56,7 @@ public final class MainActivity extends Activity {
     private static final int MUTED = 0xffc2b8d0;
     private static final int PICK_FILE = 18;
     private static final int POSTER_LIMIT = 3 * 1024 * 1024;
-    private enum Page { HOME, SAVED, SEARCH, DETAIL, SOURCES, PROFILES, SETTINGS, PLAYER }
+    private enum Page { HOME, SAVED, SEARCH, DETAIL, SOURCES, PROFILES, SETTINGS, ACCOUNT, PLAYER }
     private interface Task<T> { T run() throws Exception; }
     private interface Result<T> { void accept(T result); }
     private static final class Choice {
@@ -74,8 +75,15 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService artwork = Executors.newFixedThreadPool(2);
     private final LruCache<String, Bitmap> images = new LruCache<>(20);
+    private TvLibrary guestLibrary;
     private TvLibrary library;
     private TvUpdates updates;
+    private TvAccount account;
+    private TvSync sync;
+    private String accountId;
+    private long syncedAt;
+    private String syncIssue = "";
+    private TextView syncReport;
     private String downloadedVersion;
     private LinearLayout screen;
     private LinearLayout body;
@@ -85,6 +93,7 @@ public final class MainActivity extends Activity {
     private int pageToken;
     private String focusTag;
     private String search = "";
+    private TvLibrary fileLibrary;
     private Button updateButton;
     private TextView updateReport;
     private ProgressBar updateProgress;
@@ -114,9 +123,12 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle savedState) {
         super.onCreate(savedState);
         enterImmersive();
-        library = new TvLibrary(this);
+        library = guestLibrary = new TvLibrary(this);
+        account = new TvAccount(this, this::onAccount);
+        sync = new TvSync(account, this::onSync);
         updates = new TvUpdates(this, this::renderUpdate);
         showHome();
+        account.start();
         updates.check();
     }
 
@@ -125,6 +137,7 @@ public final class MainActivity extends Activity {
         foreground = true;
         enterImmersive();
         if (player != null) player.resumeFromBackground();
+        if (sync != null) sync.now();
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
@@ -153,6 +166,8 @@ public final class MainActivity extends Activity {
     @Override protected void onDestroy() {
         cancelNextEpisode();
         if (player != null) player.release();
+        if (sync != null) sync.close();
+        if (account != null) account.close();
         if (updates != null) updates.close();
         worker.shutdownNow();
         artwork.shutdownNow();
@@ -170,7 +185,7 @@ public final class MainActivity extends Activity {
             closePlayer();
         } else if (page == Page.DETAIL) {
             backFromDetail();
-        } else if (page == Page.SOURCES || page == Page.PROFILES) {
+        } else if (page == Page.SOURCES || page == Page.PROFILES || page == Page.ACCOUNT) {
             showSettings();
         } else if (page != Page.HOME) {
             showHome();
@@ -269,6 +284,7 @@ public final class MainActivity extends Activity {
         updateButton = null;
         updateReport = null;
         updateProgress = null;
+        syncReport = null;
         screen = column();
         screen.setPadding(dp(34), dp(20), dp(34), dp(18));
         screen.setBackgroundColor(BACKGROUND);
@@ -463,8 +479,9 @@ public final class MainActivity extends Activity {
         returnPage = origin;
         detail = title;
         season = 1;
+        TvLibrary source = library;
         createPage(Page.DETAIL, title.title);
-        runTask("Titel wird geladen …", () -> library.details(title), value -> {
+        runTask("Titel wird geladen …", () -> source.details(title), value -> {
             detail = value;
             TvLibrary.Progress latest = library.latest(value);
             if (latest != null) season = latest.season;
@@ -528,11 +545,12 @@ public final class MainActivity extends Activity {
             margin(body, text("Keine abspielbaren Videos gefunden.", 19, MUTED, false), 10);
         }
         TvLibrary.Title title = detail;
+        TvLibrary source = library;
         Button remove = button("Aus Mediathek entfernen", () -> new AlertDialog.Builder(this)
             .setTitle("Titel aus Mediathek entfernen?").setMessage(title.title)
             .setNegativeButton("Abbrechen", null)
             .setPositiveButton("Entfernen", (dialog, which) -> runTask("Titel wird entfernt …", () -> {
-                library.remove(title);
+                source.remove(title);
                 return true;
             }, result -> backFromDetail())).show());
         actionLine(body, remove);
@@ -547,7 +565,8 @@ public final class MainActivity extends Activity {
 
     private void startEpisode(TvLibrary.Episode episode) {
         TvLibrary.Title title = detail;
-        runTask("Video wird vorbereitet …", () -> library.resolve(title, episode), resolved -> {
+        TvLibrary sourceLibrary = library;
+        runTask("Video wird vorbereitet …", () -> sourceLibrary.resolve(title, episode), resolved -> {
             List<Choice> available = new ArrayList<>();
             for (TvLibrary.Source source : resolved.sources) {
                 List<TvLibrary.Variant> variants = new ArrayList<>(source.variants);
@@ -557,6 +576,7 @@ public final class MainActivity extends Activity {
             }
             if (available.isEmpty()) { showError("Für diese Auswahl wurde kein direkt abspielbarer Videostream gefunden."); return; }
             playingEpisode = resolved;
+            sync.setActiveEpisode(resolved.id);
             choices = available;
             tried.clear();
             lastPosition = 0;
@@ -583,6 +603,7 @@ public final class MainActivity extends Activity {
                 long now = SystemClock.elapsedRealtime();
                 if (finished || now - savedAt >= 1500 || player == null || !player.isPlaying()) {
                     library.saveProgress(playingEpisode, lastPosition, lastDuration, finished);
+                    sync.changed();
                     savedAt = now;
                 }
             }
@@ -684,13 +705,18 @@ public final class MainActivity extends Activity {
     }
 
     private void closePlayer() {
+        releasePlayer();
+        showDetail();
+    }
+
+    private void releasePlayer() {
         cancelNextEpisode();
         TvPlayer previous = player;
         player = null;
         if (previous != null) previous.release();
         playingEpisode = null;
+        sync.setActiveEpisode(null);
         choices = Collections.emptyList();
-        showDetail();
     }
 
     private void showPlayerOptions() {
@@ -741,8 +767,13 @@ public final class MainActivity extends Activity {
         String[] options = {"Webadresse eingeben", "Datei auswählen"};
         new AlertDialog.Builder(this).setTitle("Quelle hinzufügen").setItems(options, (dialog, which) -> {
             if (which == 0) prompt("Video- oder Katalogadresse", "https://…", "",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI,
-                value -> runTask("Quelle wird geprüft …", () -> library.importUrl(value), result -> showHome()));
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, value -> {
+                    TvLibrary destination = library;
+                    runTask("Quelle wird geprüft …", () -> destination.importUrl(value), result -> {
+                        sync.now();
+                        showHome();
+                    });
+                });
             else pickFile();
         }).show();
     }
@@ -754,15 +785,20 @@ public final class MainActivity extends Activity {
         select.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"video/*", "application/json", "application/vnd.kinotix.catalog+json"});
         select.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try {
+            fileLibrary = library;
             startActivityForResult(select, PICK_FILE);
         } catch (ActivityNotFoundException error) {
+            fileLibrary = null;
             showError("Auf diesem Fire TV ist keine Dateiauswahl verfügbar. Füge die Quelle als HTTPS-Adresse hinzu.");
         }
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK_FILE || result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request != PICK_FILE) return;
+        TvLibrary destination = fileLibrary;
+        fileLibrary = null;
+        if (result != RESULT_OK || data == null || data.getData() == null || destination != library) return;
         Uri uri = data.getData();
         String type = getContentResolver().getType(uri);
         String name = "Lokales Video";
@@ -774,13 +810,14 @@ public final class MainActivity extends Activity {
             runTask("Datei wird gelesen …", () -> {
                 try (InputStream input = getContentResolver().openInputStream(uri)) {
                     if (input == null) throw new IOException("Die Datei konnte nicht geöffnet werden.");
-                    return library.importJson(new String(read(input, 2 * 1024 * 1024), StandardCharsets.UTF_8));
+                    return destination.importJson(new String(read(input, 2 * 1024 * 1024), StandardCharsets.UTF_8));
                 }
-            }, imported -> showHome());
+            }, imported -> { sync.now(); showHome(); });
         } else {
             try {
                 getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 library.addFile(uri.toString(), name);
+                sync.now();
                 showHome();
             } catch (Exception error) {
                 showError("Der Zugriff auf das Video lässt sich auf diesem Gerät nicht speichern.");
@@ -790,18 +827,19 @@ public final class MainActivity extends Activity {
 
     private void showSources() {
         createPage(Page.SOURCES, "Kataloge");
+        TvLibrary source = library;
         Button add = button("Quelle hinzufügen", this::addSource);
         buttonRow(body, add, button("Zurück", this::showSettings));
         for (TvLibrary.Catalog catalog : library.catalogs()) {
             Button item = button(catalog.name, () -> new AlertDialog.Builder(this).setTitle(catalog.name)
                 .setItems(new String[]{"Katalog aktualisieren", "Katalog entfernen"}, (dialog, which) -> {
-                    if (which == 0) runTask("Katalog wird aktualisiert …", () -> library.refresh(catalog), value -> showSources());
+                    if (which == 0) runTask("Katalog wird aktualisiert …", () -> source.refresh(catalog), value -> showSources());
                     else new AlertDialog.Builder(this).setTitle("Katalog entfernen?")
                         .setMessage(catalog.name).setNegativeButton("Abbrechen", null)
                         .setPositiveButton("Entfernen", (confirm, action) -> runTask("Katalog wird entfernt …", () -> {
-                            library.removeCatalog(catalog);
+                            source.removeCatalog(catalog);
                             return true;
-                        }, value -> showSources())).show();
+                        }, value -> { sync.changed(); showSources(); })).show();
                 }).show());
             actionLine(body, item);
         }
@@ -835,6 +873,7 @@ public final class MainActivity extends Activity {
         createPage(Page.SETTINGS, "Einstellungen");
         Button profiles = button("Profil · " + library.activeProfile(), this::showProfiles);
         actionLine(body, profiles);
+        actionLine(body, button("Google-Konto", this::showAccount));
         actionLine(body, button("Kataloge", this::showSources));
         updateAutoplayButton();
         margin(body, text("Software-Updates", 24, TEXT, true), 24);
@@ -854,6 +893,90 @@ public final class MainActivity extends Activity {
         actionLine(body, updateButton);
         renderUpdate(updates.state());
         focus(profiles);
+    }
+
+    private void onAccount(TvAccount.State state) {
+        String owner = state.connected ? state.id : null;
+        if (!Objects.equals(owner, accountId)) {
+            if (player != null) releasePlayer();
+            accountId = owner;
+            syncedAt = 0;
+            syncIssue = "";
+            library = owner == null ? guestLibrary : new TvLibrary(this, owner);
+            sync.bind(owner, library);
+            if (page == Page.ACCOUNT) showAccount();
+            else showHome();
+        } else if (page == Page.ACCOUNT) showAccount();
+    }
+
+    private void onSync(String owner, boolean changed, long lastSyncMs, String issue) {
+        if (!Objects.equals(owner, accountId)) return;
+        syncedAt = lastSyncMs;
+        syncIssue = issue;
+        if (syncReport != null) syncReport.setText(syncMessage());
+        if (changed && page == Page.HOME) {
+            View focused = getCurrentFocus();
+            if (focused != null && focused.getTag() instanceof String) focusTag = (String)focused.getTag();
+            showHome();
+        }
+    }
+
+    private void showAccount() {
+        createPage(Page.ACCOUNT, "Google-Konto");
+        TvAccount.State state = account.state();
+        Button back = button("Zurück", this::showSettings);
+        Button first = back;
+        if (state.connected) {
+            margin(body, text(state.email, 20, TEXT, true), 4);
+            syncReport = text(syncMessage(), 18, MUTED, false);
+            syncReport.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            margin(body, syncReport, 8);
+            Button refresh = button("Jetzt synchronisieren", () -> {
+                syncReport.setText("Synchronisiere …");
+                sync.now();
+            });
+            Button signOut = button("Abmelden", account::signOut);
+            signOut.setEnabled(!state.signingOut);
+            refresh.setEnabled(!state.signingOut);
+            buttonRow(body, back, refresh, signOut);
+            if (!guestLibrary.catalogs().isEmpty() && !state.signingOut) {
+                Button copy = button("Lokale Kataloge ins Konto übernehmen", () -> {
+                    TvLibrary destination = library;
+                    runTask("Kataloge werden übernommen …", () -> destination.copyGuestCatalogs(guestLibrary), result -> {
+                        sync.now();
+                        showAccount();
+                    });
+                });
+                actionLine(body, copy);
+            }
+            first = refresh.isEnabled() ? refresh : back;
+        } else {
+            margin(body, text("Kataloge und Wiedergabestand von Mein Profil zwischen deinen Geräten synchronisieren.",
+                18, MUTED, false), 5);
+            if (state.signingIn) {
+                Button cancel = button("Anmeldung abbrechen", account::cancelSignIn);
+                buttonRow(body, back, cancel);
+                first = cancel;
+            } else {
+                Button signIn = button("Mit Google anmelden", account::signIn);
+                signIn.setEnabled(state.configured && !state.restoring && !state.signingOut);
+                buttonRow(body, back, signIn);
+                if (signIn.isEnabled()) first = signIn;
+            }
+        }
+        if (state.message != null && !state.message.isEmpty()) {
+            TextView notice = text(state.message, 18, MUTED, false);
+            notice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            margin(body, notice, 10);
+        }
+        focus(first);
+    }
+
+    private String syncMessage() {
+        if (!syncIssue.isEmpty()) return syncIssue;
+        if (syncedAt <= 0) return "Synchronisiere …";
+        return "Zuletzt synchronisiert um " + android.text.format.DateFormat.getTimeFormat(this)
+            .format(new java.util.Date(syncedAt));
     }
 
     private void updateAutoplayButton() {

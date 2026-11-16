@@ -74,6 +74,22 @@ verify_jsoup "$jsoup"
 
 mkdir -p "$work/generated" "$work/classes" "$work/dex" "$work/assets/licenses"
 unzip -p "$jsoup" META-INF/jsoup/LICENSE > "$work/assets/licenses/jsoup.txt"
+account_config=${KINOTIX_FIRETV_ACCOUNT_CONFIG:-"$project/app/supabase.json"}
+if [[ -e "$account_config" || -n "${KINOTIX_FIRETV_ACCOUNT_CONFIG:-}" ]]; then
+    python3 - "$account_config" "$work/assets/supabase.json" <<'PY'
+import json, re, sys
+with open(sys.argv[1]) as source:
+    value = json.load(source)
+url = value.get('url', '')
+key = value.get('publishableKey', '')
+if not isinstance(url, str) or not re.fullmatch(r'https://[a-z0-9-]+\.supabase\.co/?', url):
+    raise SystemExit('Die Konto-Konfiguration braucht eine gültige Supabase-Projektadresse.')
+if not isinstance(key, str) or not re.fullmatch(r'sb_publishable_[A-Za-z0-9_-]+', key):
+    raise SystemExit('Die Konto-Konfiguration braucht einen öffentlichen Publishable Key.')
+with open(sys.argv[2], 'w') as target:
+    json.dump({'url': url.rstrip('/'), 'publishableKey': key}, target)
+PY
+fi
 "$tools/aapt2" compile --dir "$src/res" -o "$work/resources.zip"
 "$tools/aapt2" link -I "$platform" --manifest "$src/AndroidManifest.xml" \
     --java "$work/generated" -A "$work/assets" --min-sdk-version 25 --target-sdk-version 34 \

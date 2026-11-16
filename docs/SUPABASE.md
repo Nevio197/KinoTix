@@ -2,6 +2,8 @@
 
 KinoTix speichert Gastkataloge und den Gastverlauf auf dem Gerät. Nach der Google-Anmeldung lädt die App den Katalog und den Wiedergabestand aus dem eigenen Supabase-Konto. Ein Katalog, der im Gastmodus eingerichtet wurde, lässt sich über **Einstellungen → Kataloge → Lokale Kataloge ins Konto übernehmen** kopieren. Beim Abmelden öffnet KinoTix wieder den Gastbereich.
 
+Auf Fire TV liegen An- und Abmeldung, der manuelle Abgleich und die Katalogübernahme unter **Einstellungen → Google-Konto**. Der Fire TV nutzt denselben Dienst und speichert seine eigene Anmeldung verschlüsselt im Android-Keystore. [Fire TV einrichten](FIRE-TV.md)
+
 ## Eigenes Projekt einrichten
 
 1. Im [Supabase-Dashboard](https://supabase.com/dashboard) ein Projekt für KinoTix anlegen. Die Projektregion passend zum Nutzerkreis auswählen.

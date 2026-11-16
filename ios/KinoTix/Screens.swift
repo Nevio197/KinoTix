@@ -54,8 +54,8 @@ struct KinoTixRootView: View {
             KinoPlayerHost(store: store)
         }
         .task { await store.start() }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await store.becameActive() } }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            store.sceneChanged(isActive: phase == .active)
         }
     }
 
@@ -535,10 +535,11 @@ private struct KinoSettingsView: View {
             Button("Mit diesem Konto verbinden", systemImage: "person.crop.circle.badge.checkmark") {
                 Task { await store.confirmAccount() }
             }
+            .disabled(store.isBusy)
             Button("Abbrechen", role: .cancel) { Task { await store.cancelSignIn() } }
         } else if store.accountPending {
             ProgressView("Warte auf die Google-Anmeldung …")
-            Text("Die Browserseite kann „TV“ anzeigen. Kehre nach der Anmeldung zu KinoTix zurück, um dein Konto zu bestätigen.")
+            Text("Kehre nach der Bestätigung im Browser zu KinoTix zurück. Hier kannst du dein Konto dann verbinden.")
                 .font(.footnote).foregroundStyle(KinoColors.muted)
             Button("Abbrechen", role: .cancel) { Task { await store.cancelSignIn() } }
         } else {

@@ -32,7 +32,8 @@ actor KinoAccountClient {
     }
 
     private enum Failure: LocalizedError {
-        case unconfigured, invalidResponse, unavailable, tooLarge, credentials, signedOut, alreadySignedIn, pairingExpired
+        case unconfigured, invalidResponse, unavailable, tooLarge, credentials, signedOut, alreadySignedIn
+        case pairingExpired, signInInterrupted
         case http(Int)
 
         var errorDescription: String? {
@@ -45,6 +46,7 @@ actor KinoAccountClient {
             case .signedOut: "Die Anmeldung ist nicht mehr aktiv."
             case .alreadySignedIn: "Ein Google-Konto ist bereits angemeldet."
             case .pairingExpired: "Die Anmeldung ist abgelaufen. Starte sie erneut."
+            case .signInInterrupted: "Die Anmeldung wurde unterbrochen. Starte sie erneut."
             case .http(let status): "Der KinoTix-Kontodienst ist gerade nicht verfügbar (HTTP \(status))."
             }
         }
@@ -80,11 +82,18 @@ actor KinoAccountClient {
         let code: String?
     }
 
+    private enum PairingStage {
+        case waiting
+        case exchange(String)
+        case verify(Tokens)
+    }
+
     private struct Pairing {
         let id: String
         let verifier: String
         let readToken: String
         let expiry: Date
+        var stage = PairingStage.waiting
     }
 
     private struct Merge: Encodable {
@@ -170,15 +179,51 @@ actor KinoAccountClient {
 
     func pollSignIn() async throws -> String? {
         guard let pairing else { return nil }
-        guard pairing.expiry > Date() else {
-            cancelSignIn()
-            throw Failure.pairingExpired
-        }
+        let attempt = generation
+        try requirePairing(attempt, expiry: pairing.expiry)
         if let awaitingConfirmation { return awaitingConfirmation.identity.email }
         guard polling == nil else { return nil }
-        let attempt = generation
         polling = attempt
         defer { if polling == attempt { polling = nil } }
+
+        // The server returns a ready code once. Retain each completed step across transport cancellation.
+        if case .waiting = pairing.stage {
+            guard let code = try await pollCode(pairing, attempt: attempt) else { return nil }
+            try requirePairing(attempt, expiry: pairing.expiry)
+            self.pairing?.stage = .exchange(code)
+        }
+        if case .exchange(let code)? = self.pairing?.stage {
+            let tokens: Tokens
+            do {
+                tokens = try await exchangeToken("pkce", body: ["auth_code": code, "code_verifier": pairing.verifier])
+            } catch Failure.http(400) {
+                try requirePairing(attempt, expiry: pairing.expiry)
+                cancelSignIn()
+                throw Failure.signInInterrupted
+            }
+            do {
+                try requirePairing(attempt, expiry: pairing.expiry)
+                self.pairing?.stage = .verify(tokens)
+            } catch {
+                Task { await revoke(tokens.access_token) }
+                throw error
+            }
+        }
+        guard case .verify(let tokens)? = self.pairing?.stage else { throw Failure.invalidResponse }
+        do {
+            let verified = try await verify(tokens, expectedOwner: nil)
+            try requirePairing(attempt, expiry: pairing.expiry)
+            awaitingConfirmation = verified
+            return verified.identity.email
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if generation == attempt { cancelSignIn() }
+            throw error
+        }
+    }
+
+    private func pollCode(_ pairing: Pairing, attempt: UUID) async throws -> String? {
         let data: Data
         do {
             data = try await post(Self.pairingPath + "/poll", ["id": pairing.id, "readToken": pairing.readToken])
@@ -189,7 +234,7 @@ actor KinoAccountClient {
             cancelSignIn()
             throw Failure.pairingExpired
         }
-        try ensureCurrent(attempt)
+        try requirePairing(attempt, expiry: pairing.expiry)
         let status = try JSONDecoder().decode(PairingStatus.self, from: data)
         if status.status == "pending" { return nil }
         if status.status == "expired" {
@@ -198,21 +243,7 @@ actor KinoAccountClient {
         }
         guard status.status == "ready", let code = status.code,
               Self.matches(code, #"^[A-Za-z0-9._~-]{8,512}$"#) else { throw Failure.invalidResponse }
-        let tokens = try await exchangeToken("pkce", body: ["auth_code": code, "code_verifier": pairing.verifier])
-        do {
-            try ensureCurrent(attempt)
-            let verified = try await verify(tokens, expectedOwner: nil)
-            try ensureCurrent(attempt)
-            guard pairing.expiry > Date() else {
-                cancelSignIn()
-                throw Failure.pairingExpired
-            }
-            awaitingConfirmation = verified
-            return verified.identity.email
-        } catch {
-            await revoke(tokens.access_token)
-            throw error
-        }
+        return code
     }
 
     func confirmSignIn() async throws -> KinoAccountIdentity {
@@ -229,13 +260,13 @@ actor KinoAccountClient {
 
     func cancelSignIn() {
         guard activeSession == nil else { return }
+        if case .verify(let tokens)? = pairing?.stage {
+            Task { await revoke(tokens.access_token) }
+        }
         generation = UUID()
         pairing = nil
         starting = nil
         polling = nil
-        if let token = awaitingConfirmation?.access {
-            Task { await revoke(token) }
-        }
         awaitingConfirmation = nil
     }
 
@@ -343,6 +374,14 @@ actor KinoAccountClient {
 
     private func ensureCurrent(_ attempt: UUID) throws {
         guard attempt == generation else { throw Failure.signedOut }
+    }
+
+    private func requirePairing(_ attempt: UUID, expiry: Date) throws {
+        try ensureCurrent(attempt)
+        guard expiry > Date() else {
+            cancelSignIn()
+            throw Failure.pairingExpired
+        }
     }
 
     private func exchangeToken(_ grant: String, body: [String: String]) async throws -> Tokens {

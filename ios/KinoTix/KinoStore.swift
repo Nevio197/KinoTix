@@ -37,6 +37,12 @@ final class KinoStore: ObservableObject {
     private var backgroundSync: Task<Void, Never>?
     private var pendingSync: Task<Void, Never>?
     private var signInPolling: Task<Void, Never>?
+    private var signInAttempt: UUID?
+    private var openingSignIn = false
+    private var waitingForBrowser = false
+    private var leftForBrowser = false
+    private var confirmingSignIn = false
+    private var sceneIsActive = false
     private var playRequest = UUID()
 
     init() {
@@ -62,8 +68,20 @@ final class KinoStore: ObservableObject {
         }
     }
 
-    func becameActive() async {
-        if accountPending { await pollAccount() }
+    func sceneChanged(isActive: Bool) {
+        sceneIsActive = isActive
+        if waitingForBrowser {
+            if !isActive { leftForBrowser = true }
+            else if leftForBrowser { waitingForBrowser = false }
+        }
+        if isActive {
+            startAccountPolling()
+            Task { await becameActive() }
+        }
+    }
+
+    private func becameActive() async {
+        guard sceneIsActive else { return }
         if owner != nil { await syncNow() }
         else if !catalogs.isEmpty && homeTitles.isEmpty { await refreshCatalogs() }
     }
@@ -106,60 +124,98 @@ final class KinoStore: ObservableObject {
 
     func signIn() async {
         guard owner == nil, !accountPending else { return }
+        let attempt = UUID()
+        signInAttempt = attempt
         accountPending = true
+        openingSignIn = true
         status = nil
         do {
             let challenge = try await account.beginSignIn()
-            guard accountPending else { return }
+            guard signInAttempt == attempt else { return }
+            waitingForBrowser = true
+            leftForBrowser = !sceneIsActive
             guard await UIApplication.shared.open(challenge.url) else {
                 throw KinoStoreError("Der Link zur Google-Anmeldung konnte nicht geöffnet werden.")
             }
-            signInPolling = Task { [weak self] in
-                while let self, self.accountPending, self.accountCandidate == nil, !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(2))
-                    guard !Task.isCancelled else { return }
-                    await self.pollAccount()
-                }
-            }
+            guard signInAttempt == attempt else { return }
+            openingSignIn = false
+            startAccountPolling()
         } catch {
-            accountPending = false
-            status = error.localizedDescription
+            guard signInAttempt == attempt else { return }
+            await cancelSignIn()
+            if !(error is CancellationError) { status = error.localizedDescription }
         }
     }
 
-    private func pollAccount() async {
-        guard accountPending, accountCandidate == nil else { return }
+    private func startAccountPolling() {
+        guard let attempt = signInAttempt, signInPolling == nil, canPollAccount(attempt) else { return }
+        signInPolling = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.signInAttempt == attempt { self.signInPolling = nil }
+            }
+            while self.canPollAccount(attempt), !Task.isCancelled {
+                await self.pollAccount(attempt)
+                guard self.canPollAccount(attempt) else { break }
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
+        }
+    }
+
+    private func canPollAccount(_ attempt: UUID) -> Bool {
+        sceneIsActive && !openingSignIn && !waitingForBrowser && signInAttempt == attempt && accountCandidate == nil
+    }
+
+    private func pollAccount(_ attempt: UUID) async {
         do {
-            let result = try await account.pollSignIn()
-            if accountPending { accountCandidate = result }
+            if let candidate = try await account.pollSignIn(), signInAttempt == attempt {
+                accountCandidate = candidate
+            }
+        } catch is CancellationError {
+            // iOS may cancel an HTTP request as Safari takes the foreground.
         } catch {
-            guard accountPending else { return }
-            accountPending = false
-            status = error.localizedDescription
+            guard signInAttempt == attempt else { return }
+            await cancelSignIn()
+            status = (error is DecodingError) ?
+                "Die Anmeldung konnte nicht bestätigt werden. Starte sie bitte erneut." : error.localizedDescription
         }
     }
 
     func confirmAccount() async {
         guard accountPending, accountCandidate != nil, !isBusy else { return }
+        confirmingSignIn = true
         isBusy = true
-        defer { isBusy = false }
+        defer {
+            confirmingSignIn = false
+            isBusy = false
+        }
         do {
             let identity = try await account.confirmSignIn()
             accountCandidate = nil
             accountPending = false
+            signInAttempt = nil
             signInPolling?.cancel()
+            signInPolling = nil
             select(identity)
             await syncNow()
         } catch {
-            status = error.localizedDescription
+            confirmingSignIn = false
+            await cancelSignIn()
+            if !(error is CancellationError) { status = error.localizedDescription }
         }
     }
 
     func cancelSignIn() async {
-        accountPending = false
+        guard accountPending, !confirmingSignIn, signInAttempt != nil else { return }
+        signInAttempt = nil
+        openingSignIn = false
+        waitingForBrowser = false
+        leftForBrowser = false
         accountCandidate = nil
         signInPolling?.cancel()
+        signInPolling = nil
         await account.cancelSignIn()
+        accountPending = false
     }
 
     func signOut() async {

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KinoTix</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="chrome">
+    <button class="brand" data-action="home" data-focus="home" aria-label="KinoTix Startseite"><img src="icon.png" alt="">KinoTix</button>
+    <nav aria-label="Hauptnavigation">
+      <button data-action="home" data-focus="nav-home">Mediathek</button>
+      <button data-action="search" data-focus="nav-search">Suche</button>
+      <button data-action="library" data-focus="nav-library">Merkliste</button>
+      <button data-action="settings" data-focus="nav-settings">Einstellungen</button>
+    </nav>
+  </header>
+  <main id="view" tabindex="-1"></main>
+  <script src="transport.js"></script>
+  <script src="formats.js"></script>
+  <script src="provider.js"></script>
+  <script src="library.js"></script>
+  <script src="qrcode.js"></script>
+  <script src="account.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

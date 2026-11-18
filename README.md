@@ -4,6 +4,8 @@ Desktop-Videoplayer für Windows x64 und macOS. Unter **Hinzufügen** kannst du 
 
 Die eigenständige [Fire-TV-Ausgabe](docs/FIRE-TV.md) nutzt eine Oberfläche für die Fernbedienung und einen eigenen APK-Update-Kanal auf GitHub.
 
+Die eigenständige [Samsung-Ausgabe](samsung/README.md) für Tizen 10 übernimmt Kataloge und Wiedergabestand über dasselbe Google-Konto. Sie bietet eine TV-Oberfläche, Vollbild mit ausblendbaren Bedienelementen, Intro-Sprünge bei verfügbaren Zeitmarken, Schlaftimer und einen abbrechbaren Countdown zur nächsten Folge. Entwicklerinstallationen erhalten neue WGT-Pakete über einen verbundenen Rechner.
+
 **[KinoTix für Windows herunterladen](https://github.com/Nevio197/KinoTix/releases/latest)**. Installiere den GitHub-Build einmal, um automatische Updates einzuschalten. Für macOS gibt es einen lokal erstellbaren Universal-Build ab macOS 13. Das signierte GitHub-Release für macOS steht aus.
 
 Auf der Startseite zeigt **Weiterschauen** den Fortschritt und die Restlaufzeit. Der Player bietet eine Bildvorschau und Zeitmarken auf der Zeitleiste, Lautstärke, Bild-in-Bild, Schlaftimer und Vollbild. Bei verfügbaren Alternativen kann KinoTix nach einem Wiedergabefehler die Quelle wechseln. Tonspurwahl, Qualität und nächste Folge erscheinen bei passenden Medien. [Zeitmarken für Intro und Abspann](docs/ZEITMARKEN.md)

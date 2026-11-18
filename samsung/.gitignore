@@ -1,0 +1,12 @@
+/build/
+/dist/
+*.wgt
+*.p12
+*.pfx
+*.pem
+*.wasm
+*.data
+tizen-fetch.js
+.DS_Store
+__pycache__/
+*.pyc

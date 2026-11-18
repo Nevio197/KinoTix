@@ -1,0 +1,12 @@
+--- a/tools/system_libs.py
++++ b/tools/system_libs.py
+@@ -1315,3 +1315,3 @@
+   cflags = [
+-    '-std=c++14',
++    '-std=c++17',
+     '-isystem' + shared.path_from_root('system', 'lib'),
+@@ -1339,3 +1339,3 @@
+   name = 'lib_tizen_tv_wasm'
+-  cflags = ['-std=c++14']
++  cflags = ['-std=c++17']
+   depends = ['libc++abi']

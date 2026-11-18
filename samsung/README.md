@@ -18,7 +18,7 @@ patch -d "$sdk/fastcomp/emscripten" -p1 < samsung/samsung-sdk-cxx17.patch
 EMCC="$sdk/fastcomp/emscripten/emcc.py" PYTHON=python3 \
   samsung/build-transport.sh '/Pfad/zur/cacert.pem'
 python3 samsung/package-widget.py --unsigned \
-  dist/samsung/KinoTix-0.2.1-Samsung-unsigned.wgt
+  dist/samsung/KinoTix-0.2.2-Samsung-unsigned.wgt
 ```
 
 `package-widget.py` übernimmt aus `app/supabase.json` ausschließlich Projektadresse und öffentlichen Publishable Key. `KINOTIX_SAMSUNG_ACCOUNT_CONFIG` kann eine andere Konfigurationsdatei auswählen. Ohne Konfiguration ist der Gastmodus verfügbar. Der Netzwerk-Worker entsteht unter `samsung/build/transport`. [Transport-Schnittstelle](TRANSPORT.md)
@@ -28,11 +28,11 @@ Erstelle im Samsung Certificate Manager ein Profil mit Autoren- und Distribution
 ```sh
 python3 samsung/package-widget.py --profile 'Mein-TV-Profil' \
   --tizen '/Pfad/zu/tizen-studio/tools/ide/bin/tizen' \
-  dist/samsung/KinoTix-0.2.1-Samsung.wgt
-tizen install -n KinoTix-0.2.1-Samsung.wgt -t '<TV-Ziel>' -- dist/samsung
+  dist/samsung/KinoTix-0.2.2-Samsung.wgt
+tizen install -n KinoTix-0.2.2-Samsung.wgt -t '<TV-Ziel>' -- dist/samsung
 ```
 
-Der Fernseher muss über den Entwicklermodus als autorisiertes Ziel verbunden sein. Für das Upgrade der bisherigen KinoGER-Installation bleiben Paket- und App-ID erhalten. Der Anzeigename ist KinoTix, die Versionsnummer ist 0.2.1. [Samsung Zertifikate](https://developer.samsung.com/smarttv/develop/getting-started/setting-up-sdk/creating-certificates.html) · [Samsung TV als Testgerät](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html)
+Der Fernseher muss über den Entwicklermodus als autorisiertes Ziel verbunden sein. Für das Upgrade der bisherigen KinoGER-Installation bleiben Paket- und App-ID erhalten. Der Anzeigename ist KinoTix, die Versionsnummer ist 0.2.2. [Samsung Zertifikate](https://developer.samsung.com/smarttv/develop/getting-started/setting-up-sdk/creating-certificates.html) · [Samsung TV als Testgerät](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/tv-device.html)
 
 ## Updates
 

@@ -518,7 +518,7 @@
       show()
     }, { focus: 'auto-skip' })
     playbackOptions.append(autoNext, autoSkip)
-    root.append(playbackOptions, el('p', 'caption', 'KinoTix 0.2.1 · Samsung TV'))
+    root.append(playbackOptions, el('p', 'caption', 'KinoTix 0.2.2 · Samsung TV'))
     root.append(el('p', 'caption', 'Zeitmarken von IntroDB · ODbL. Serieninformationen von TVmaze · CC BY-SA.'))
     focusKey(route.focus, row.querySelector('button'))
   }

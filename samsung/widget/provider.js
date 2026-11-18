@@ -399,6 +399,14 @@
             if (season === 999) failed()
           }
         }
+        // Some static players append a numeric option (for example volume).
+        // Accept only the literal, never expressions, callbacks or remote code.
+        if (take(',')) {
+          trivia()
+          const option = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?/i.exec(text.slice(index))?.[0]
+          if (!option || option.length > 32 || !Number.isFinite(Number(option))) failed()
+          index += option.length
+        }
         expect(')')
         return result
       }

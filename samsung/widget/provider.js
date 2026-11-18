@@ -49,8 +49,9 @@
   let epoch = 0
   let mediaEpoch = 0
   let lastRequest = 'Noch keine Katalogabfrage'
-  const homeCache = new Map()
-  const indexCache = new Map()
+  const homeOne = cachedListing(loadHome)
+  const readIndex = cachedListing(loadIndex)
+  const searchNames = new WeakMap()
   const titleCache = new Map()
   const episodeSources = new WeakMap()
   const markerIdentities = new Map()
@@ -75,8 +76,6 @@
     if (ordered(next) === ordered(catalogs)) return false
     catalogs = next
     epoch++
-    homeCache.clear()
-    indexCache.clear()
     titleCache.clear()
     return true
   }
@@ -173,10 +172,26 @@
       isSeries: Boolean(source.detail.seriesPrefix && url.pathname.startsWith(source.detail.seriesPrefix))}
   }
 
-  async function homeOne(source) {
-    const cached = homeCache.get(source.id)
-    if (cached && cached.until > Date.now()) return cached.items
-    const ticket = epoch
+  function cachedListing(load) {
+    // A changed catalog gets a new source object, even when it reuses its old ID.
+    const cache = new WeakMap()
+    return source => {
+      const cached = cache.get(source)
+      if (cached && cached.until > Date.now()) return cached.promise
+      const entry = {until: Infinity}
+      entry.promise = load(source).then(items => {
+        entry.until = Date.now() + 120000
+        return items
+      }, error => {
+        cache.delete(source)
+        throw error
+      })
+      cache.set(source, entry)
+      return entry.promise
+    }
+  }
+
+  async function loadHome(source) {
     const page = safeTree(await read(source.origin, catalogHosts(source)))
     if (source.listing.root && !pick(page, source.listing.root)) {
       throw Error('Die Quelle liefert nicht die erwartete Katalogstruktur.')
@@ -187,9 +202,7 @@
       const item = catalogTitle(source, node.getAttribute('href'), title, listingPoster(node, title, source.origin, source))
       if (item) results.set(item.url, item)
     }
-    const items = [...results.values()]
-    if (ticket === epoch) homeCache.set(source.id, {until: Date.now() + 120000, items})
-    return items
+    return [...results.values()]
   }
 
   async function home() {
@@ -206,11 +219,7 @@
     return [...result.values()]
   }
 
-  async function readIndex(source) {
-    if (!source.index) return []
-    const cached = indexCache.get(source.id)
-    if (cached && cached.until > Date.now()) return cached.items
-    const ticket = epoch
+  async function loadIndex(source) {
     const xml = await read(source.index, catalogHosts(source), indexLimit)
     if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw Error('Der Suchindex enthält nicht unterstützte XML-Deklarationen.')
     const tree = new DOMParser().parseFromString(xml, 'application/xml')
@@ -236,32 +245,41 @@
       const item = catalogTitle(source, address.href, label[0]?.toLocaleUpperCase('de') + label.slice(1))
       if (item) results.set(item.url, item)
     }
-    const items = [...results.values()]
-    if (ticket === epoch) indexCache.set(source.id, {until: Date.now() + 120000, items})
-    return items
+    return [...results.values()]
   }
 
   async function search(query) {
     const input = typeof query === 'string' ? query.trim().slice(0, 125) : ''
     if (!input) return home()
     const ticket = epoch
-    const responses = await Promise.allSettled([...catalogs.values()].flatMap(source => [homeOne(source), readIndex(source)]))
+    const responses = await Promise.allSettled([...catalogs.values()].flatMap(source =>
+      source.index ? [homeOne(source), readIndex(source)] : [homeOne(source)]))
     if (ticket !== epoch) throw Error('Der Katalog hat sich geändert. Suche erneut.')
-    const found = new Map([...media.values()].map(item => [item.url, item]))
-    for (const response of responses) {
-      if (response.status === 'fulfilled') for (const item of response.value) found.set(item.url, item)
+    const phrase = normalize(input).replace(/ß/g, 'ss'), terms = phrase.split(/\s+/)
+    const matches = new Map()
+    function collect(items) {
+      for (const item of items) {
+        if (matches.has(item.url)) continue
+        let name = searchNames.get(item)
+        if (!name) {
+          name = normalize(item.title).replace(/ß/g, 'ss')
+          searchNames.set(item, name)
+        }
+        if (!terms.every(term => name.includes(term))) continue
+        const rank = name === phrase ? 0 : name.startsWith(phrase) ? 1 : name.includes(' ' + phrase) ? 2 :
+          name.includes(phrase) ? 3 : 4
+        matches.set(item.url, {item, rank})
+      }
     }
-    const phrase = normalize(input), terms = phrase.split(/\s+/)
-    const matches = [...found.values()].filter(item => terms.every(term => normalize(item.title).includes(term)))
-    if (!matches.length && responses.length && responses.every(row => row.status === 'rejected')) {
+    collect(media.values())
+    for (const response of responses) {
+      if (response.status === 'fulfilled') collect(response.value)
+    }
+    if (!matches.size && responses.length && responses.every(row => row.status === 'rejected')) {
       throw Error('Die Katalogsuche ist gerade nicht erreichbar.')
     }
-    const rank = item => {
-      const name = normalize(item.title)
-      return name === phrase ? 0 : name.startsWith(phrase + ' ') ? 1 : name.includes(phrase) ? 2 : 3
-    }
-    return matches.sort((a, b) => rank(a) - rank(b) || a.title.length - b.title.length ||
-      a.title.localeCompare(b.title, 'de')).slice(0, 80)
+    return [...matches.values()].sort((a, b) => a.rank - b.rank || a.item.title.length - b.item.title.length ||
+      a.item.title.localeCompare(b.item.title, 'de')).slice(0, 80).map(entry => entry.item)
   }
 
   function matchPattern(pattern, texts, groups) {

@@ -333,6 +333,7 @@
     const field = el('input')
     field.type = 'search'
     field.placeholder = 'Film oder Serie'
+    field.maxLength = 125
     field.value = route.query || ''
     field.dataset.focus = 'search-input'
     field.autocomplete = 'off'
@@ -343,56 +344,105 @@
     form.append(field, submit)
     const layout = el('section', 'search-layout')
     const keys = el('div', 'search-keys')
+    keys.setAttribute('role', 'group')
     keys.setAttribute('aria-label', 'Bildschirmtastatur')
     const output = el('div', 'search-results')
     layout.append(keys, output)
     root.append(form, layout)
-    const set = text => {
-      field.value = text
-      route.query = text
-      searchResults = null
+    let timer
+    let revision = 0
+    let pending
+    let lastKey
+    for (const letters of ['QWERTZUIOPÜ', 'ASDFGHJKLÖÄ', 'YXCVBNM,.-', '1234567890ß']) {
+      const row = el('div', 'key-row')
+      for (const char of letters) {
+        row.append(button(char, () => set(field.value + char), { focus: 'key-' + char }))
+      }
+      keys.append(row)
     }
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789'.split('').forEach(char => {
-      keys.append(button(char, () => set(field.value + char), { className: '', focus: 'key-' + char }))
-    })
-    keys.append(
+    const actions = el('div', 'key-actions')
+    actions.append(
       button('Leerzeichen', () => set(field.value + ' '), { className: 'wide-key', focus: 'spacing' }),
       button('← Löschen', () => set(field.value.slice(0, -1)), { className: 'wide-key', focus: 'delete' }),
       button('Leeren', () => set(''), { className: 'wide-key', focus: 'clear' })
     )
+    keys.append(actions)
+    keys.addEventListener('focusin', event => { lastKey = event.target })
+    layout.addEventListener('keydown', event => {
+      const key = keyNames[event.keyCode] || event.key
+      let target
+      if (key === 'ArrowRight' && keys.contains(event.target) && !event.target.nextElementSibling) {
+        target = output.querySelector('.search-suggestion')
+      } else if (key === 'ArrowLeft' && event.target.classList.contains('search-suggestion')) {
+        target = lastKey || keys.querySelector('button')
+      }
+      if (target) {
+        event.preventDefault()
+        event.stopPropagation()
+        focusElement(target)
+      }
+    })
     field.addEventListener('input', () => set(field.value))
     form.addEventListener('submit', event => {
       event.preventDefault()
-      void search()
+      void refresh(true, true)
     })
-    async function search() {
+    function set(text) {
+      field.value = text.slice(0, field.maxLength)
+      route.query = field.value
+      route.fullResults = false
+      revision++
+      clearTimeout(timer)
+      output.replaceChildren()
+      if (field.value.trim().length < 2) hint()
+      else timer = setTimeout(() => { if (form.isConnected) void refresh(false) }, 250)
+    }
+    function hint() {
+      output.replaceChildren(status('Ab zwei Zeichen erscheinen Titelvorschläge.', 'status'))
+    }
+    function display(items, full) {
+      if (!items.length) {
+        output.replaceChildren(message('Keine Treffer', 'Probiere einen anderen Titel oder eine kürzere Suche.'))
+      } else if (full) {
+        output.replaceChildren(headingSection('Suchergebnisse', grid(items, 'result')))
+      } else {
+        const list = el('div', 'suggestion-list')
+        for (const title of items.slice(0, 5)) {
+          list.append(button(title.title, () => navigate({ name: 'detail', title }), {
+            className: 'search-suggestion', focus: 'suggest:' + title.url
+          }))
+        }
+        output.replaceChildren(headingSection('Vorschläge', list))
+      }
+    }
+    async function refresh(full, focusResults = false) {
+      clearTimeout(timer)
+      const ticket = ++revision
       const query = field.value.trim()
       route.query = field.value
-      if (query.length < 2) {
-        output.replaceChildren(message('Film oder Serie suchen', 'Gib mindestens zwei Zeichen ein.'))
-        return
-      }
-      const id = ++generation
-      output.replaceChildren(status('Suche läuft …'))
+      route.fullResults = full
+      if (query.length < 2) { hint(); return }
+      const current = () => ticket === revision && form.isConnected
+      const origin = document.activeElement
       try {
-        const items = await window.KinoProvider.search(query)
-        if (id !== generation || route.name !== 'search') return
-        searchResults = { query, items: Array.isArray(items) ? items : [] }
-        results()
-        focusElement(output.querySelector('button') || submit)
+        if (searchResults?.query !== query) {
+          output.replaceChildren(status(full ? 'Suche läuft …' : 'Vorschläge werden geladen …'))
+          if (pending?.query !== query) pending = { query, request: window.KinoProvider.search(query) }
+          const items = await pending.request
+          if (!current()) return
+          searchResults = { query, items }
+        }
+        display(searchResults.items, full)
       } catch (error) {
-        if (id !== generation || route.name !== 'search') return
-        output.replaceChildren(message('Suche nicht verfügbar', errorText(error, 'Die Verbindung zum Katalog ist fehlgeschlagen.'), search))
-        focusElement(output.querySelector('button'))
+        if (!current()) return
+        pending = null
+        output.replaceChildren(message('Suche nicht verfügbar', errorText(error, 'Die Verbindung zum Katalog ist fehlgeschlagen.'), () => refresh(full, true)))
+      }
+      if (focusResults && (document.activeElement === origin || document.activeElement === document.body)) {
+        focusElement(output.querySelector('button') || submit)
       }
     }
-    function results() {
-      const match = searchResults && searchResults.query === (route.query || '').trim() ? searchResults.items : null
-      if (match?.length) output.replaceChildren(headingSection('Suchergebnisse', grid(match, 'result')))
-      else if (match) output.replaceChildren(message('Keine Treffer', 'Probiere einen anderen Titel oder eine kürzere Suche.'))
-      else output.replaceChildren(status('Gib einen Filmtitel oder Seriennamen ein.', 'status'))
-    }
-    results()
+    void refresh(Boolean(route.fullResults))
     focusKey(route.focus, keys.querySelector('button'))
   }
 
@@ -518,7 +568,7 @@
       show()
     }, { focus: 'auto-skip' })
     playbackOptions.append(autoNext, autoSkip)
-    root.append(playbackOptions, el('p', 'caption', 'KinoTix 0.2.2 · Samsung TV'))
+    root.append(playbackOptions, el('p', 'caption', 'KinoTix 0.2.3 · Samsung TV'))
     root.append(el('p', 'caption', 'Zeitmarken von IntroDB · ODbL. Serieninformationen von TVmaze · CC BY-SA.'))
     focusKey(route.focus, row.querySelector('button'))
   }

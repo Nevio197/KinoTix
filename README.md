@@ -14,6 +14,10 @@ Katalogimport, Wiedergabe, Quellenwechsel, Zeitleistenvorschau und Tonspurwahl s
 
 Im Gastmodus bleiben Kataloge, Merkliste und Verlauf auf dem jeweiligen Gerät. Mit **Google-Konto → Mit Google anmelden** öffnest du die Anmeldung im Browser. Supabase synchronisiert danach deine importierten Kataloge und den Wiedergabestand von **Mein Profil** zwischen Windows und macOS. [Supabase-Konto einrichten](docs/SUPABASE.md) · [Eigene Kataloge importieren](docs/KATALOGE.md)
 
+## Windows 0.4.7
+
+Unter **Hinzufügen → Domain als Katalog hinzufügen** genügt der Domainname. KinoTix übernimmt auf dem Gerät vorhandene Katalogregeln und erkennt von der Webseite bereitgestellte Kataloge. [Kataloge per Domain einrichten](docs/KATALOGE.md)
+
 ## Windows 0.4.6
 
 Unter **Einstellungen → Kataloge → Lokale Kataloge ins Konto übernehmen** lassen sich auch zuvor entfernte Kataloge wieder hinzufügen. Bei einer Browserprüfung bietet KinoTix **Im Browser öffnen** an. Die Suche zeigt an, wenn ein Katalog nicht antwortet, und behält Treffer aus erreichbaren Quellen.

@@ -6,7 +6,7 @@ const { openLibrary } = require('./library.cjs')
 const { openMedia, openAccountMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
-const { decodeTitle,https } = require('./catalog-format.cjs')
+const { decodeTitle,https,catalogDomain } = require('./catalog-format.cjs')
 const { checkSource, blockedHost, browserCheck, isDnsError } = require('./source-check.cjs')
 const { openNetworkSettings } = require('./network-settings.cjs')
 const { createUpdater } = require('./public-updater.cjs')
@@ -552,7 +552,13 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     return true
   }
   if (action === 'source-preview') {
+    let origin
+    try { origin=catalogDomain(payload.url) } catch {}
+    const known=origin && (catalog.sourceByOrigin(origin) || deviceCatalog.sourceByOrigin(origin))
+    if (known) return {kind:'domain',name:known.name,message:'Für diese Domain sind auf diesem PC bereits Katalogregeln gespeichert.'}
     const {source,...result}=await inspectSource(payload.url,catalog)
+    if (origin && result.kind==='website') return {kind:'domain',name:new URL(origin).hostname,
+      message:'KinoTix kann diese Domain speichern und auf der Startseite nach Titeln suchen.'}
     return result
   }
   if (action === 'source-add') {
@@ -567,6 +573,13 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     throw Error(result.message)
   }
   if (action === 'source-file') return chooseSourceFile(payload)
+  if (action === 'catalog-add-domain') {
+    const target=catalog
+    const source=await target.resolveDomain(payload.domain,deviceCatalog,origin=>checkSource(origin,catalogOptions))
+    if (target!==catalog) throw Error('Das Konto hat sich geändert. Gib die Domain erneut ein.')
+    if (!target.sourceByOrigin(source.origin)) sync.recordCatalog(target.importSource(source))
+    return {kind:'catalog'}
+  }
   if (action === 'catalog-home') return catalog.home()
   if (action === 'catalog-state') return {sources:catalog.list(),available:catalog!==deviceCatalog && catalog.missingFrom(deviceCatalog).length>0}
   if (action === 'catalog-open-browser') return shell.openExternal(catalog.browserAddress(payload.id,payload.title))

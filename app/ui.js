@@ -423,6 +423,11 @@ async function copyDeviceCatalogs() {
 async function showCatalogs() {
   const state=await request('catalog-state')
   const view=make('div','','stack')
+  view.append(namedForm('Katalog-Domain, z. B. katalog.example.org','Domain hinzufügen',async domain=>{
+    await request('catalog-add-domain',{domain})
+    settings.close()
+    await showHome()
+  }))
   for (const source of state.sources) {
     const row=make('div','','catalog-row')
     const label=make('div')
@@ -798,6 +803,7 @@ const sourceResult = document.querySelector('#source-result')
 const sourceDetails = document.querySelector('#source-details')
 const sourceActions = document.querySelector('#source-actions')
 const sourceSave = document.querySelector('#source-save')
+const sourceDomain = document.querySelector('#domain-save')
 const sourceNetwork = document.querySelector('#source-network')
 const sourceFile = document.querySelector('#file-open')
 let sourceRevision = 0
@@ -831,9 +837,9 @@ async function checkSource() {
   try {
     const result = await request('source-preview',{url:sourceURL.value.trim()})
     if (revision !== sourceRevision || !linkDialog.open) return
-    if (result.kind === 'video' || result.kind === 'catalog') checkedSource = result
+    if (['video','catalog','domain'].includes(result.kind)) checkedSource = result
     const titles = {
-      video:'Video erkannt',catalog:result.name || 'KinoTix-Katalog erkannt',
+      video:'Video erkannt',catalog:result.name || 'KinoTix-Katalog erkannt',domain:result.name,
       website:'Webseite erkannt',unreachable:'Quelle nicht erreichbar',invalid:'Adresse prüfen',
     }
     showSourceResult(result.kind,titles[result.kind],result.message,result.code)
@@ -846,7 +852,7 @@ async function checkSource() {
 }
 async function addSource(method, value) {
   if (sourceFile.disabled) return
-  sourceFile.disabled = sourceCheck.disabled = sourceSave.disabled = sourceURL.disabled = true
+  sourceDomain.disabled = sourceFile.disabled = sourceCheck.disabled = sourceSave.disabled = sourceURL.disabled = true
   try {
     const result = await request(method,value)
     if (!result) return
@@ -857,15 +863,19 @@ async function addSource(method, value) {
   } catch (error) {
     if (linkDialog.open) sourceFailure(error)
   } finally {
-    sourceFile.disabled = sourceCheck.disabled = sourceSave.disabled = sourceURL.disabled = false
+    sourceDomain.disabled = sourceFile.disabled = sourceCheck.disabled = sourceSave.disabled = sourceURL.disabled = false
   }
 }
 function chooseSourceFile() { return addSource('source-file',{}) }
 addForm.addEventListener('submit',event=>{event.preventDefault(); void checkSource()})
 sourceURL.addEventListener('input',resetSourcePreview)
 sourceFile.addEventListener('click',()=>void chooseSourceFile())
+sourceDomain.addEventListener('click',()=>{
+  if (sourceURL.reportValidity()) void addSource('catalog-add-domain',{domain:sourceURL.value.trim()})
+})
 sourceSave.addEventListener('click',()=>{
-  if (checkedSource) void addSource('source-add',{url:sourceURL.value.trim(),title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
+  if (checkedSource?.kind==='domain') void addSource('catalog-add-domain',{domain:sourceURL.value.trim()})
+  else if (checkedSource) void addSource('source-add',{url:sourceURL.value.trim(),title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
 })
 sourceNetwork.addEventListener('click',()=>{
   linkDialog.close()

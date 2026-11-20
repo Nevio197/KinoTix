@@ -2,7 +2,7 @@ const fs=require('node:fs')
 const path=require('node:path')
 const {createHash}=require('node:crypto')
 const {setTimeout:delay}=require('node:timers/promises')
-const {https,config,decodeTitle,titleID,episodeID,catalogRecord}=require('./catalog-format.cjs')
+const {https,config,catalogDomain,defaultDomainSource,decodeTitle,titleID,episodeID,catalogRecord}=require('./catalog-format.cjs')
 const {blockedHost,networkIssue,httpIssue,browserCheck,dnsRedirectIssue}=require('./source-check.cjs')
 
 const reader=fs.readFileSync(path.join(__dirname,'catalog-reader.js'),'utf8')
@@ -42,6 +42,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     }
   } catch {}
   const visible=()=>[...records.values()].filter(record=>!record.removed).map(record=>record.source)
+  const sourceByOrigin=origin=>visible().find(source=>source.origin===origin)
   const titles=new Map(), listing=new Map(), index=new Map(), videos=new Map()
   const findSource=id=>records.get(id)?.source
   const save=()=>{
@@ -289,6 +290,16 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     records:()=>[...records.values()],apply,importFile,importSource,
     missingFrom:other=>other.records().filter(row=>row.source && !findSource(row.id)).map(row=>row.source),
     browserAddress,searchResults,
+    sourceByOrigin,
+    async resolveDomain(value,device,discover) {
+      const origin=catalogDomain(value)
+      const known=sourceByOrigin(origin) || device.sourceByOrigin(origin)
+      if (known) return known
+      const info=await discover(origin)
+      if (info.kind!=='catalog') return defaultDomainSource(origin)
+      if (info.source.origin!==origin) throw Error('Der verknüpfte Katalog gehört zu einer anderen Domain.')
+      return info.source
+    },
     async check(source) { return (await loadListing(config(source))).length },
     remove(id) {
       if (!findSource(id)) throw Error('Der Katalog ist nicht vorhanden.')

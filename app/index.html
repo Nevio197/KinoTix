@@ -56,12 +56,12 @@
       <h2 id="import-title">Quelle hinzufügen</h2>
       <button type="button" id="cancel-link" class="icon-button" aria-label="Schließen"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button>
     </div>
-    <label class="field-label" for="url">Webadresse</label>
+    <label class="field-label" for="url">Webadresse oder Domain</label>
     <div class="source-input">
       <input type="text" inputmode="url" name="url" id="url" placeholder="Adresse einfügen" autocomplete="off" spellcheck="false" aria-describedby="source-hint" required>
       <button type="submit" id="source-check" class="primary">Adresse prüfen</button>
     </div>
-    <p id="source-hint" class="source-hint">Link zu einem Video oder zu einem KinoTix-Katalog.</p>
+    <p id="source-hint" class="source-hint">Gib einen Videolink, einen Kataloglink oder eine Domain wie katalog.example.org ein.</p>
     <div id="source-result" class="source-result" hidden>
       <div role="status">
         <strong id="source-kind"></strong>
@@ -80,6 +80,7 @@
       </div>
     </div>
     <div class="import-options">
+      <button type="button" id="domain-save">Domain als Katalog hinzufügen</button>
       <button type="button" id="file-open"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>Datei auswählen</button>
       <button type="button" id="catalog-open"><svg class="icon" aria-hidden="true"><use href="#icon-grid"></use></svg>Kataloge verwalten</button>
     </div>

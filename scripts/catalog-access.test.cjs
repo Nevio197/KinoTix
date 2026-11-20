@@ -42,6 +42,33 @@ test('browser checks are reported even with a successful HTTP status',async()=>{
   assert.equal(result.code,'browser-check')
 })
 
+test('adding a domain preserves the existing rules and catalog references after removal',async t=>{
+  const device=setup(t),account=setup(t)
+  device.importSource(fixture)
+  account.apply(device.records())
+  account.remove(fixture.id)
+  const known=await account.resolveDomain('KATALOG.EXAMPLE.ORG/',device,()=>assert.fail('unexpected network request'))
+  assert.deepEqual(known,device.sourceByOrigin(fixture.origin))
+  account.importSource(known)
+  assert.equal(account.has(titleID(fixture.id,'/example')),true)
+})
+
+test('new domains accept published catalogs and plain domains, including while offline',async t=>{
+  const catalog=setup(t)
+  const resolve=(domain,info)=>catalog.resolveDomain(domain,catalog,async()=>info)
+  const manifest={kind:'catalog',source:fixture}
+  assert.deepEqual(await resolve('katalog.example.org',manifest),fixture)
+  await assert.rejects(resolve('other.example.org',manifest),/anderen Domain/)
+  for (const invalid of ['other.example.org/path','https://name:pw@other.example.org','http://other.example.org','file:///test','other.example.org?key=value','example']) {
+    await assert.rejects(resolve(invalid,manifest))
+  }
+  const fallback=await resolve('other.example.org',{kind:'unreachable'})
+  assert.deepEqual(fallback,await resolve('https://OTHER.example.org/',{kind:'website'}))
+  assert.equal(fallback.origin,'https://other.example.org')
+  assert.deepEqual(fallback.mediaHosts,['other.example.org'])
+  assert.equal(catalog.importSource(fallback).id,fallback.id)
+})
+
 test('catalog search keeps partial results and can recover after an index failure',async t=>{
   let blocked=true, status=403
   const issue=browserCheck({'cf-mitigated':['challenge']})

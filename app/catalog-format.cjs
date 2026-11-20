@@ -13,6 +13,27 @@ function https(value) {
   }
   return url
 }
+function catalogDomain(value) {
+  const input=typeof value==='string' ? value.trim() : ''
+  if (!/^(?:https:\/\/)?[^\s/@?#\\]+\/?$/i.test(input)) throw Error('Gib eine Domain ohne Pfad ein, zum Beispiel katalog.example.org.')
+  const url=https(/^https:\/\//i.test(input)?input:'https://'+input)
+  if (!url.hostname.includes('.')) throw Error('Gib eine vollständige Domain ein.')
+  return url.origin
+}
+
+function defaultDomainSource(origin) {
+  const hostname=new URL(origin).hostname
+  const links='a[data-catalog-item][href], article h2 a[href], article h3 a[href], article > a[href], article a[rel~="bookmark"][href], [itemtype$="/Movie"] a[itemprop="url"][href], [itemtype$="/TVSeries"] a[itemprop="url"][href]'
+  return config({
+    version:1,id:'domain-'+createHash('sha256').update(origin).digest('hex').slice(0,24),
+    name:hostname,origin,playerHosts:[hostname],mediaHosts:[hostname],
+    listing:{root:links,items:links},
+    detail:{title:'h1',groups:'body',controls:'[data-episode][data-source]',episodeAttribute:'data-episode',
+      sourceAttribute:'data-source',iframe:'video[src], video source[src], iframe[src]',poster:'[itemprop="image"] img, img[itemprop="image"]',
+      description:'[itemprop="description"], article .description'},
+    player:{}
+  })
+}
 function text(value,limit,label,optional=false) {
   if (optional && value==null) return undefined
   if (typeof value!=='string' || !value.trim() || value.length>limit) throw Error('Ungültige Angabe für '+label+'.')
@@ -84,4 +105,4 @@ function catalogRecord(value) {
   } catch { return null }
 }
 
-module.exports={https,config,decodeTitle,titleID,episodeID,reference,catalogRecord}
+module.exports={https,catalogDomain,defaultDomainSource,config,decodeTitle,titleID,episodeID,reference,catalogRecord}

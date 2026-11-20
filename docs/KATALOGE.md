@@ -2,7 +2,7 @@
 
 Öffne **Hinzufügen**. Füge einen direkten Videolink oder die HTTPS-Adresse einer KinoTix-Katalogdatei ein und wähle **Adresse prüfen**. Eine erkannte Quelle kannst du anschließend in die Mediathek übernehmen. Über **Datei auswählen** lassen sich eine Videodatei, eine JSON-Medienliste oder eine JSON-Katalogdatei importieren.
 
-Wenn eine Webseite keine kompatiblen Katalogdaten anbietet, brauchst du einen direkten Videolink oder eine passende Katalogdatei. Bei Fehlern unterscheidet KinoTix eine fehlende Katalogstruktur von einem Problem beim Zugriff. Gespeicherte Kataloge findest du unter **Einstellungen → Kataloge**.
+Für einen Katalog ohne Datei gib unter **Hinzufügen** die Domain ein und wähle **Domain als Katalog hinzufügen**. Das geht auch unter **Einstellungen → Kataloge**. Eine bereits auf diesem Gerät eingerichtete Domain behält ihre Regeln für Titel, Suche und Wiedergabe. Bei neuen Domains verwendet KinoTix einen von der Seite verknüpften Katalog oder sucht nach Titelkarten und Videos auf derselben Domain. Die Domain bleibt auch bei einem Verbindungsfehler gespeichert. Zum Anzeigen der Titel muss die Seite erreichbar sein und passende Daten liefern.
 
 Unter **Einstellungen → Verbindung** ist **Automatisch** die Voreinstellung. KinoTix beginnt mit dem System-DNS. Scheitert die Namensauflösung, versucht die App dieselbe Adresse erneut mit verschlüsseltem DNS über Cloudflare. Nach einem Neustart beginnt die Automatik wieder mit dem System-DNS. Die HTTPS-Zertifikatsprüfung bleibt aktiv.
 

@@ -1,7 +1,7 @@
 {
   "name": "kinotix",
   "productName": "KinoTix",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "KinoTix für Windows und macOS mit eigener Medienbibliothek",
   "main": "main.cjs",
   "dependencies": {

@@ -3,7 +3,7 @@ const path=require('node:path')
 const {createHash}=require('node:crypto')
 const {setTimeout:delay}=require('node:timers/promises')
 const {https,config,decodeTitle,titleID,episodeID,catalogRecord}=require('./catalog-format.cjs')
-const {blockedHost,networkIssue,httpIssue,dnsRedirectIssue}=require('./source-check.cjs')
+const {blockedHost,networkIssue,httpIssue,browserCheck,dnsRedirectIssue}=require('./source-check.cjs')
 
 const reader=fs.readFileSync(path.join(__dirname,'catalog-reader.js'),'utf8')
 const reliableID=value=>typeof value==='string' && /^tt\d{7,12}$/.test(value)?value:undefined
@@ -88,6 +88,15 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     }
     return update(source)
   }
+  function browserAddress(id,titleRef) {
+    const source=findSource(id)
+    if (!source) throw Error('Der Katalog ist nicht vorhanden.')
+    if (titleRef===undefined) return source.origin
+    const ref=decodeTitle(titleRef)
+    const url=ref?.id===id && webURL(source,ref.pathname)
+    if (!url) throw Error('Die Titeladresse gehört nicht zum Katalog.')
+    return url
+  }
 
   function read(source,address,rules,accept) {
     return withDnsFallback(()=>readOnce(source,address,rules,accept))
@@ -106,6 +115,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     const stop=new Promise((_,reject)=>{
       const fail=({code,message})=>{ if (!navigation.signal.aborted) reject(sourceError(code,message)) }
       timeout=setTimeout(()=>fail({code:'timeout',message:'Die Quelle antwortet zu langsam. Versuche es gleich noch einmal.'}),10500)
+      contents.once('catalog-browser-check',fail)
       contents.on('did-navigate',(_event,_target,status)=>{
         if (status>=400) fail(httpIssue(status))
       })
@@ -136,10 +146,14 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
   }
   async function homeOne(source) {
     const cached=listing.get(source.id)
-    if (cached && cached.until>Date.now()) return cached.items
-    const items=await loadListing(source)
-    listing.set(source.id,{until:Date.now()+120000,items})
-    return items
+    if (cached && cached.until>Date.now()) return cached.operation
+    const entry={until:Date.now()+120000,operation:loadListing(source)}
+    listing.set(source.id,entry)
+    try { return await entry.operation }
+    catch (error) {
+      if (listing.get(source.id)===entry) listing.delete(source.id)
+      throw error
+    }
   }
   async function readIndex(source) {
     if (!source.index) return []
@@ -155,7 +169,11 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
             throw sourceError(code,message)
           }
         })
-        if (!response.ok || !response.body) throw Error('Der Suchindex ist nicht erreichbar.')
+        const issue=browserCheck(response.headers) || (!response.ok && httpIssue(response.status))
+        if (issue || !response.body || response.headers.get('content-type')?.toLowerCase().startsWith('text/html')) {
+          await response.body?.cancel().catch(()=>{})
+          throw issue ? sourceError(issue.code,issue.message) : sourceError('index','Die Quelle hat keinen XML-Suchindex geliefert.')
+        }
         let bytes=0, xml=''
         const decoder=new TextDecoder()
         for await (const chunk of response.body) {
@@ -164,6 +182,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
           xml+=decoder.decode(chunk,{stream:true})
         }
         xml+=decoder.decode()
+        if (!/<(?:[\w.-]+:)?urlset(?:\s|\/?>)/i.test(xml)) throw sourceError('index','Die Quelle hat keinen XML-Suchindex geliefert.')
         const results=[]
         for (const match of xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)) {
           const url=safeURL(match[1].trim())
@@ -177,7 +196,10 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
           if (results.length>=80000) break
         }
         return results
-      })().catch(()=>{index.delete(source.id);return []})
+      })().catch(error=>{
+        if (index.get(source.id)===operation) index.delete(source.id)
+        throw error
+      })
       index.set(source.id,operation)
     }
     return index.get(source.id)
@@ -238,8 +260,35 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     videos.set(key,{until:Date.now()+120000,value:result})
     return result
   }
+  async function searchResults(query) {
+    const terms=normalize(query).split(/\s+/).filter(Boolean)
+    const found=new Map(), issues=[]
+    if (terms.length) {
+      const responses=await Promise.all(visible().map(async source=>({
+        source, parts:await Promise.allSettled([homeOne(source),readIndex(source)])
+      })))
+      for (const {source,parts} of responses) {
+        const failures=new Set()
+        for (const part of parts) {
+          if (part.status==='rejected') {
+            const {message,code}=part.reason
+            if (!failures.has(message)) issues.push({id:source.id,name:source.name,issue:message,issueCode:code})
+            failures.add(message)
+            continue
+          }
+          for (const item of part.value) {
+            if (found.size>=60) break
+            if (!found.has(item.url) && terms.every(term=>normalize(item.title).includes(term))) found.set(item.url,item)
+          }
+        }
+      }
+    }
+    return {items:[...found.values()],issues}
+  }
   return {
     records:()=>[...records.values()],apply,importFile,importSource,
+    missingFrom:other=>other.records().filter(row=>row.source && !findSource(row.id)).map(row=>row.source),
+    browserAddress,searchResults,
     async check(source) { return (await loadListing(config(source))).length },
     remove(id) {
       if (!findSource(id)) throw Error('Der Katalog ist nicht vorhanden.')
@@ -248,23 +297,11 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     list:()=>visible().map(source=>({id:source.id,name:source.name,origin:source.origin})),
     async home() {
       return Promise.all(visible().map(async source=>{
-        try { return {name:source.name,items:await homeOne(source)} }
-        catch (e) { return {name:source.name,items:[],issue:e.message,issueCode:e.code} }
+        try { return {id:source.id,name:source.name,items:await homeOne(source)} }
+        catch (e) { return {id:source.id,name:source.name,items:[],issue:e.message,issueCode:e.code} }
       }))
     },
-    async search(query) {
-      const terms=normalize(query).split(/\s+/).filter(Boolean)
-      if (!terms.length) return []
-      const found=new Map()
-      await Promise.all(visible().map(async source=>{
-        const [items,fromIndex]=await Promise.all([homeOne(source).catch(()=>[]),readIndex(source)])
-        for (const item of [...items,...fromIndex]) {
-          if (terms.every(term=>normalize(item.title).includes(term)) && !found.has(item.url)) found.set(item.url,item)
-          if (found.size>=80) break
-        }
-      }))
-      return [...found.values()].slice(0,60)
-    },
+    async search(query) { return (await searchResults(query)).items },
     async detail(url) {
       const value=await title(url)
       return {...value,episodes:value.episodes.map(({id,season,episode})=>({id,season,episode}))}

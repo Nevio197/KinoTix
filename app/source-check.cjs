@@ -35,10 +35,20 @@ async function blockedHost(hostname) {
 }
 
 function httpIssue(status) {
+  if (status === 429) return {code:'rate-limit',message:'Die Quelle erhält zu viele Anfragen. Versuche es später erneut.'}
   if (status === 451) return {code:'blocked',message:'Der Zugriff auf diese Adresse ist gesperrt.'}
   if (status === 401 || status === 403) return {code:'forbidden',message:'Die Quelle verweigert den Zugriff. Prüfe, ob der Link öffentlich erreichbar ist.'}
   if (status === 404 || status === 410) return {code:'missing',message:'Die Adresse wurde nicht gefunden. Prüfe den Link.'}
   return {code:'http',message:'Die Quelle antwortet mit HTTP ' + status + '. ' + accessibleMessage}
+}
+
+// Fetch exposes Headers, while Electron webRequest supplies arrays keyed by header name.
+function browserCheck(headers) {
+  const marker = typeof headers?.get === 'function' ? headers.get('cf-mitigated') :
+    Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === 'cf-mitigated')?.[1]
+  if ([marker].flat().some(value => typeof value === 'string' && value.trim().toLowerCase() === 'challenge')) {
+    return {code:'browser-check',message:'Die Quelle verlangt eine Prüfung im Browser. KinoTix erhält deshalb keine Katalogdaten.'}
+  }
 }
 
 function isDnsError(error) {
@@ -67,6 +77,11 @@ async function request(url, fetcher, signal, detectBlock) {
       response = await fetcher(target.href,{redirect:'manual',credentials:'omit',cache:'no-store',signal})
     } catch (error) {
       return {issue:await networkIssue(error,target,detectBlock)}
+    }
+    const verification = browserCheck(response.headers)
+    if (verification) {
+      await response.body?.cancel().catch(()=>{})
+      return {issue:verification}
     }
     if (response.ok) return {response,target}
     const location = redirects.has(response.status) && response.headers.get('location')
@@ -191,4 +206,4 @@ async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCa
   return result('invalid','Die Adresse liefert weder ein unterstütztes Video noch einen KinoTix-Katalog.')
 }
 
-module.exports = { checkSource, blockedHost, networkIssue, httpIssue, dnsRedirectIssue, isDnsError }
+module.exports = { checkSource, blockedHost, networkIssue, httpIssue, browserCheck, dnsRedirectIssue, isDnsError }

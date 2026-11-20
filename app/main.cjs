@@ -7,7 +7,7 @@ const { openMedia, openAccountMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
-const { checkSource, blockedHost, isDnsError } = require('./source-check.cjs')
+const { checkSource, blockedHost, browserCheck, isDnsError } = require('./source-check.cjs')
 const { openNetworkSettings } = require('./network-settings.cjs')
 const { createUpdater } = require('./public-updater.cjs')
 const { autoSkip, destination, markerService, readSegments, segmentKey, timelineSegments } = require('./segments.js')
@@ -52,6 +52,11 @@ function makeCatalogView(partition,topHosts,resourceHosts) {
   isolated.setPermissionCheckHandler(()=>false)
   isolated.webRequest.onBeforeRequest((details,done)=>done({cancel:!permitted(details.url,
     ['mainFrame','subFrame'].includes(details.resourceType)?topHosts:resourceHosts)}))
+  isolated.webRequest.onHeadersReceived((details,done)=>{
+    const issue=details.resourceType==='mainFrame' && browserCheck(details.responseHeaders)
+    done({})
+    if (issue) details.webContents?.emit('catalog-browser-check',issue)
+  })
   const view=new WebContentsView({webPreferences:{...webOptions,partition}})
   const contents=view.webContents
   // An unattached view owns its WebContents and must stay alive until the request closes it.
@@ -563,7 +568,8 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   }
   if (action === 'source-file') return chooseSourceFile(payload)
   if (action === 'catalog-home') return catalog.home()
-  if (action === 'catalog-state') return {sources:catalog.list(),available:catalog!==deviceCatalog && deviceCatalog.list().length>0}
+  if (action === 'catalog-state') return {sources:catalog.list(),available:catalog!==deviceCatalog && catalog.missingFrom(deviceCatalog).length>0}
+  if (action === 'catalog-open-browser') return shell.openExternal(catalog.browserAddress(payload.id,payload.title))
   if (action === 'catalog-import') {
     const result=await dialog.showOpenDialog(win,{properties:['openFile'],filters:[{name:'Katalogdatei',extensions:['json']}]})
     if (result.canceled) return false
@@ -576,9 +582,7 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     return true
   }
   if (action === 'catalog-copy-local' && catalog!==deviceCatalog) {
-    const existing=new Set(catalog.records().map(row=>row.id))
-    const added=deviceCatalog.records().filter(row=>!row.removed && !existing.has(row.id))
-    if (catalog.apply(added)) for (const row of added) sync.recordCatalog(row)
+    for (const source of catalog.missingFrom(deviceCatalog)) sync.recordCatalog(catalog.importSource(source))
     return true
   }
   if (action === 'media-add') {
@@ -602,10 +606,19 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (action === 'home') return media.all()
   if (action === 'search') {
     const query=String(payload.query ?? '').trim().slice(0,125)
-    return [...searchTitles(query),...await catalog.search(query)].slice(0,80)
+    const local=searchTitles(query)
+    const {items,issues}=await catalog.searchResults(query)
+    const entries=[...local,...items].slice(0,80)
+    return payload.reportIssues ? {items:entries,issues} : entries
   }
   if (action === 'title') {
-    const title=await getTitle(payload.url)
+    let title
+    try { title=await getTitle(payload.url) }
+    catch (error) {
+      const ref=decodeTitle(payload.url)
+      if (payload.reportIssues && ref && error.code) return {id:ref.id,issue:error.message,issueCode:error.code}
+      throw error
+    }
     applyProgress(title.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
     return title
   }

@@ -201,6 +201,16 @@ function notice(title, description, retry) {
   }
   return block
 }
+function catalogNotice(source,retry,titleRef) {
+  const block=notice(source.name,source.issue,retry)
+  const buttons=block.querySelector('.actions')
+  if (source.issueCode==='browser-check') {
+    buttons.append(action('Im Browser öffnen',()=>request('catalog-open-browser',{id:source.id,title:titleRef})))
+  } else if (['dns','dns-blocked'].includes(source.issueCode)) {
+    buttons.append(action('Verbindungseinstellungen',showNetworkSettings))
+  } else buttons.append(action('Andere Quelle hinzufügen',openImport))
+  return block
+}
 async function refreshLibrary() {
   library = await request('library')
   history = library.history
@@ -258,6 +268,9 @@ async function showHome(newPage = 1) {
     main.prepend(emptyLibrary())
     catalog.append(importShelf())
   }
+  if (!configured.sources.length && configured.available) {
+    catalog.prepend(action('Lokale Kataloge ins Konto übernehmen',copyDeviceCatalogs))
+  }
   const loading = make('p','Kataloge werden geladen …','shelf-note')
   loading.setAttribute('role','status')
   if (configured.sources.length) catalog.append(loading)
@@ -268,14 +281,7 @@ async function showHome(newPage = 1) {
   if (!resume && !local.items.length && firstTitle) main.prepend(feature(firstTitle))
   for (const source of sources) {
     if (source.items.length) main.append(group(source.name,source.items,item=>openTitle(item)))
-    else if (source.issue) {
-      const issue = notice(source.name,source.issue,()=>showHome(page))
-      const dns = source.issueCode === 'dns-blocked'
-      issue.querySelector('.actions').append(dns
-        ? action('Verbindungseinstellungen',showNetworkSettings)
-        : action('Andere Quelle hinzufügen',openImport))
-      main.append(issue)
-    }
+    else if (source.issue) main.append(catalogNotice(source,()=>showHome(page)))
   }
   catalog.hidden = !catalog.childElementCount
 }
@@ -297,10 +303,11 @@ async function showSearch(value) {
   const results = make('section')
   main.append(results)
   try {
-    const entries = await request('search', {query:value})
+    const {items,issues} = await request('search', {query:value,reportIssues:true})
     if (id !== viewId) return
-    results.replaceChildren(entries.length ? group(value ? 'Ergebnisse für „'+value+'“' : 'Suchergebnisse',entries,item => openTitle(item))
-      : notice('Keine Treffer', 'Suche nach einem Titel in deiner Medienbibliothek.'))
+    if (items.length) results.append(group(value ? 'Ergebnisse für „'+value+'“' : 'Suchergebnisse',items,item => openTitle(item)))
+    for (const source of issues) results.append(catalogNotice(source,()=>showSearch(value)))
+    if (!items.length && !issues.length) results.append(notice('Keine Treffer', 'Suche nach einem Titel in deiner Medienbibliothek.'))
   } catch (e) {
     if (id === viewId) results.replaceChildren(notice('Suche fehlgeschlagen',cleanError(e),()=>showSearch(value)))
   }
@@ -408,6 +415,11 @@ async function showNetworkSettings() {
   })
   dialog('Verbindung',card)
 }
+async function copyDeviceCatalogs() {
+  await request('catalog-copy-local')
+  if (settings.open) settings.close()
+  await showHome()
+}
 async function showCatalogs() {
   const state=await request('catalog-state')
   const view=make('div','','stack')
@@ -423,11 +435,7 @@ async function showCatalogs() {
       }))
     view.append(row)
   }
-  if (state.available) view.append(action('Lokale Kataloge ins Konto übernehmen',async()=>{
-    await request('catalog-copy-local')
-    settings.close()
-    await showHome()
-  }))
+  if (state.available) view.append(action('Lokale Kataloge ins Konto übernehmen',copyDeviceCatalogs))
   view.append(action('Katalogdatei importieren',async()=>{
     if (await request('catalog-import')) { settings.close();await showHome() }
   },'primary'))
@@ -592,8 +600,13 @@ async function openTitle(item, resume = false) {
   const goBack = returnTo
   main.append(action('← Zurück', goBack, 'detail-bar'), notice('Titel wird geladen', item.title || 'Verbindung zu KinoTix wird aufgebaut.'))
   try {
-    const [data, records] = await Promise.all([request('title', {url:item.url}), request('history')])
+    const [data, records] = await Promise.all([request('title', {url:item.url,reportIssues:true}), request('history')])
     if (id !== viewId) return
+    if (data.issue) {
+      main.replaceChildren(action('← Zurück',goBack,'detail-bar'),
+        catalogNotice({...data,name:item.title || 'Titel konnte nicht geladen werden'},()=>openTitle(item,resume),item.url))
+      return
+    }
     detail = data
     history = records
     void request('news-seen',{url:data.url}).catch(()=>{})

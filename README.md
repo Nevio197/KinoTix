@@ -14,6 +14,14 @@ Katalogimport, Wiedergabe, Quellenwechsel, Zeitleistenvorschau und Tonspurwahl s
 
 Im Gastmodus bleiben Kataloge, Merkliste und Verlauf auf dem jeweiligen Gerät. Mit **Google-Konto → Mit Google anmelden** öffnest du die Anmeldung im Browser. Supabase synchronisiert danach deine importierten Kataloge und den Wiedergabestand von **Mein Profil** zwischen Windows und macOS. [Supabase-Konto einrichten](docs/SUPABASE.md) · [Eigene Kataloge importieren](docs/KATALOGE.md)
 
+## Windows 0.4.5
+
+Ab zwei Zeichen schlägt die Suche bis zu fünf Titel vor. In der Detailansicht kannst du einzelne importierte Titel entfernen. Über **Einstellungen → Google-Konto → Mit Handy anmelden** scannst du den QR-Code und bestätigst das angezeigte Konto am PC. Angemeldete Geräte teilen direkte HTTPS-Videolinks. Bereits gespeicherte Links kannst du im Kontomenü einzeln übernehmen. [Kontosynchronisierung](docs/SUPABASE.md)
+
+**Auf Fernseher abspielen** sucht DLNA-Medienrenderer im selben IPv4-Netz. Die Schaltfläche steht beim Film und neben jeder Folge. Der Fernseher lädt Webvideos direkt von der Quelle. Für lokale Videos muss KinoTix auf dem PC geöffnet bleiben. Unterstützt der Fernseher Positionssprünge, übernimmt er die zuletzt gespeicherte Abspielposition.
+
+Bei mehreren Tonspuren bevorzugt der Player anfangs Deutsch. Eine manuell gewählte Sprache hat Vorrang. Beim Wechsel der Quelle oder Auflösung berücksichtigt KinoTix auch die gewählte Spur innerhalb dieser Sprache. Die Qualitätswahl zeigt die von der Quelle angebotenen Auflösungen an.
+
 ## Bauen
 
 Voraussetzung ist Node.js 24. Aus dem Repository ausführen.

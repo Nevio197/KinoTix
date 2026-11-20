@@ -2,9 +2,13 @@ const fs=require('node:fs')
 const path=require('node:path')
 const {createServer}=require('node:http')
 const {createHash,randomBytes}=require('node:crypto')
-const {mediaID}=require('./media.cjs')
+const {mediaID,mediaRecord}=require('./media.cjs')
 const {reference,catalogRecord,episodeID}=require('./catalog-format.cjs')
 
+const qrCode = require('./vendor/qr.cjs')
+const {setTimeout:delay} = require('node:timers/promises')
+const phoneRoute = '/functions/v1/kinotix-tv-auth'
+const hash = value => createHash('sha256').update(value).digest('base64url')
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const random=()=>randomBytes(32).toString('base64url')
 const read=filename=>{try {return JSON.parse(fs.readFileSync(filename,'utf8'))} catch {return null}}
@@ -68,15 +72,17 @@ const recordKey=(kind,id)=>kind+':'+id
 function decode(row) {
   if (row?.kind==='catalog') return catalogRecord({...row.value,id:row.item_id,updatedAt:row.updated_at})
   if (row?.kind==='progress') return progress({...row.value,id:row.item_id,updatedAt:row.updated_at})
+  if (row?.kind==='media') return mediaRecord({...row.value,id:row.item_id,updatedAt:row.updated_at})
   return null
 }
-function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCatalogs,notify,config,fetcher=fetch,authorizeBrowser=authorize}) {
+function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCatalogs,applyMedia=()=>{},notify,config,fetcher=fetch,authorizeBrowser=authorize}) {
   const project=validConfig(config)
   const filename=path.join(folder,'account.json')
   const stored=read(filename)
-  let account,session,timer,timerDue=0,flight,signingIn=false,active=true,issue='',lastSync=null
+  let account,session,timer,timerDue=0,flight,signingIn=false,restoring=false,active=true,issue='',lastSync=null
   let pending=new Map(),downloaded=new Map()
-  const status=()=>({configured:Boolean(project),connected:Boolean(account),signingIn,lastSync,issue,email:account?.email ?? ''})
+  let phone, phoneView
+  const status=()=>({phone:phoneView,configured:Boolean(project),connected:Boolean(account),signingIn,restoring,lastSync,issue,email:account?.email ?? ''})
   const emit=()=>notify({type:'sync',...status()})
   const pendingFile=owner=>path.join(folder,'pending-'+owner.id+'.json')
   function schedule(ms) {
@@ -100,6 +106,48 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
     return response.status===204?null:response.json()
   }
   const token=(grant,body)=>api('/auth/v1/token?grant_type='+grant,{method:'POST',body:JSON.stringify(body)})
+  async function phoneAuthorization(attempt) {
+    attempt.signal.throwIfAborted()
+    const verifier=random(), readToken=random()
+    const post=(action,body)=>api(phoneRoute+'/'+action,{method:'POST', body:JSON.stringify(body)})
+    const ticket=await post('start',{challenge:hash(verifier),readHash:hash(readToken)})
+    attempt.signal.throwIfAborted()
+    const prefix=project.url+phoneRoute+'/login/'+ticket?.id+'/'
+    if (!/^[\w-]{22}$/.test(ticket?.id) || typeof ticket.url!=='string' || !ticket.url.startsWith(prefix) ||
+        !/^[\w-]{43}$/.test(ticket.url.slice(prefix.length)) || !Number.isInteger(ticket.expiresIn) ||
+        ticket.expiresIn<1 || ticket.expiresIn>300) throw Error('Der Anmeldelink ist ungültig.')
+    const qr=qrCode(0,'M')
+    qr.addData(ticket.url)
+    qr.make()
+    phoneView={image:qr.createDataURL(5,20)}
+    emit()
+    const expires=AbortSignal.timeout(ticket.expiresIn*1000)
+    const signal=AbortSignal.any([attempt.signal,expires])
+    while (!signal.aborted) {
+      try { await delay(2200,undefined,{signal}) } catch { break }
+      let result
+      try { result=await post('poll',{id:ticket.id,readToken}) }
+      catch (error) { if (error.status===429) continue; throw error }
+      signal.throwIfAborted()
+      if (result.status==='pending') continue
+      if (result.status==='ready' && /^[\w.~-]{8,512}$/.test(result.code)) {
+        return {auth_code:result.code,code_verifier:verifier}
+      }
+      break
+    }
+    throw Error('Die Handy-Anmeldung ist abgelaufen oder wurde beendet.')
+  }
+  function confirmPhone(attempt,email) {
+    const {promise,resolve,reject}=Promise.withResolvers()
+    const signal=AbortSignal.any([attempt.signal,AbortSignal.timeout(120000)])
+    signal.throwIfAborted()
+    const abort=()=>reject(Error('Die Kontobestätigung ist abgelaufen oder wurde beendet.'))
+    signal.addEventListener('abort',abort,{once:true})
+    attempt.confirm=resolve
+    phoneView={email}
+    emit()
+    return promise.finally(()=>{signal.removeEventListener('abort',abort); delete attempt.confirm})
+  }
   function setSession(value) {
     if (typeof value?.refresh_token!=='string' || typeof value.access_token!=='string' || !Number.isFinite(value.expires_in)) {
       throw Error('Der Dienst hat keine gültige Anmeldung geliefert.')
@@ -117,9 +165,13 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
     pending=new Map()
     const saved=owner && read(pendingFile(owner))
     for (const row of Array.isArray(saved)?saved:[]) {
-      if (decode(row)) pending.set(recordKey(row.kind,row.item_id),row)
+      const decoded=decode(row)
+      if (!decoded) continue
+      const {id,updatedAt,...value}=decoded
+      pending.set(recordKey(row.kind,id),{kind:row.kind,item_id:id,updated_at:updatedAt,value})
     }
     bind(owner?.id)
+    if (owner) applyMedia([...pending.values()].filter(row=>row.kind==='media').map(decode))
     schedule(0)
     emit()
   }
@@ -159,9 +211,10 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
       }
       write(pendingFile(owner),[...pending.values()])
     }
-    const [catalogs,items]=await Promise.all([readItems('catalog',auth),readItems('progress',auth)])
+    const [catalogs,addresses,items]=await Promise.all([readItems('catalog',auth),readItems('media',auth),readItems('progress',auth)])
     if (account!==owner) return
     applyCatalogs(catalogs)
+    applyMedia(addresses)
     downloaded=new Map(items.map(item=>[item.id,item]))
     apply(items)
     issue=''
@@ -182,49 +235,69 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
     })
     return flight
   }
-  function queue(kind,item) {
-    if (!account || !item) return
-    const item_id=item.id
-    const mapKey=recordKey(kind,item_id)
-    const updated_at=Math.max(item.updatedAt,(pending.get(mapKey)?.updated_at ?? 0)+1)
-    const {id,updatedAt,...value}=item
-    pending.set(mapKey,{kind,item_id,updated_at,value})
-    write(pendingFile(account),[...pending.values()])
+  function queue(kind,items) {
+    if (!account || !items.length) return
+    const next=new Map(pending)
+    for (const item of items) {
+      const {id,updatedAt,...value}=item
+      const key=recordKey(kind,id)
+      const updated_at=Math.max(updatedAt,(next.get(key)?.updated_at ?? 0)+1)
+      next.set(key,{kind,item_id:id,updated_at,value})
+    }
+    write(pendingFile(account),[...next.values()])
+    pending=next
     if (!flight && !issue && (!timer || timerDue>Date.now()+2000)) schedule(2000)
   }
   return {
     status,exchange,
     remoteProgress:id=>downloaded.get(id),
-    record(id,saved,catalog) { if (saved) queue('progress',progress({id,...saved,catalog})) },
-    recordCatalog(value) { queue('catalog',catalogRecord(value)) },
-    async signIn() {
+    record(id,saved,catalog) { if (saved) queue('progress',[progress({id,...saved,catalog})].filter(Boolean)) },
+    recordCatalog(value) { queue('catalog',[catalogRecord(value)].filter(Boolean)) },
+    recordMedia(values) { queue('media',values.map(mediaRecord).filter(Boolean)) },
+    cancelPhone() { phone?.abort() },
+    confirmPhone() { phone?.confirm?.() },
+    async signIn(method = 'browser') {
       if (!project) throw Error('Das Supabase-Projekt ist für diesen Build noch nicht eingerichtet.')
-      if (signingIn || account) return status()
+      if (signingIn || restoring || account) return status()
+      const attempt=method==='phone' ? new AbortController() : null
+      phone=attempt
+      phoneView=attempt ? {starting:true} : undefined
       signingIn=true;issue='';emit()
       try {
         if (!await safeStorage.isAsyncEncryptionAvailable()) throw Error('Der geschützte Speicher ist nicht verfügbar.')
-        const fields=await authorizeBrowser({url:project.url,openExternal})
+        const fields=attempt ? await phoneAuthorization(attempt) : await authorizeBrowser({url:project.url,openExternal})
         setSession(await token('pkce',fields))
         const user=await api('/auth/v1/user',{},session.access)
         if (!uuid.test(user?.id ?? '') || typeof user.email!=='string') throw Error('Das Konto konnte nicht bestätigt werden.')
+        if (attempt) { attempt.signal.throwIfAborted(); await confirmPhone(attempt,user.email) }
         const owner={id:user.id,email:user.email}
         const encrypted=await safeStorage.encryptStringAsync(session.refresh)
-        if (!active) return status()
+        if (!active || attempt?.signal.aborted) return status()
         write(filename,{project:project.url,id:owner.id,email:owner.email,refresh:encrypted.toString('base64')})
         select(owner)
-      } catch (error) {session=undefined;issue=error.message}
-      finally {signingIn=false;emit()}
+      } catch (error) {session=undefined;issue=attempt?.signal.aborted ? '' : error.message}
+      finally {phone=undefined;phoneView=undefined;signingIn=false;emit()}
       return status()
     },
     async start() {
-      if (!project || stored?.project!==project.url || !uuid.test(stored.id)) return
+      if (!project || !active || restoring || signingIn || account || stored?.project!==project.url || !uuid.test(stored.id)) return
+      restoring=true
+      emit()
       try {
         const decrypted=await safeStorage.decryptStringAsync(Buffer.from(stored.refresh,'base64'))
-        if (active && !decrypted.isTemporarilyUnavailable && decrypted.result) {
-          session={refresh:decrypted.result,until:0}
-          select({id:stored.id,email:stored.email})
+        if (!active) return
+        if (decrypted.isTemporarilyUnavailable || !decrypted.result) {
+          issue='Die gespeicherte Anmeldung ist gerade nicht verfügbar. Öffne den geschützten Speicher oder melde dich erneut an.'
+          return
         }
-      } catch {issue='Die gespeicherte Anmeldung konnte nicht geöffnet werden.';emit()}
+        session={refresh:decrypted.result,until:0}
+        select({id:stored.id,email:stored.email})
+      } catch {
+        if (active) issue='Die gespeicherte Anmeldung konnte nicht geöffnet werden.'
+      } finally {
+        restoring=false
+        emit()
+      }
     },
     signOut() {
       fs.rmSync(filename,{force:true})
@@ -235,6 +308,7 @@ function createAccountSync({folder,safeStorage,openExternal,bind,apply,applyCata
       return status()
     },
     async stop() {
+      phone?.abort()
       active=false
       clearTimeout(timer)
       if (flight) await flight

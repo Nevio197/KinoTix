@@ -3,7 +3,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { setTimeout: delay } = require('node:timers/promises')
 const { openLibrary } = require('./library.cjs')
-const { openMedia, formats } = require('./media.cjs')
+const { openMedia, openAccountMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
 const { decodeTitle,https } = require('./catalog-format.cjs')
@@ -18,12 +18,13 @@ const getMarkers = markerService(async url => {
   return response.ok ? response.json() : null
 })
 
+const tv = require('./tv-playback.cjs').createTvPlayback()
 const playerScript = "document.getElementById('video')"
 const mediaTimeout = 12000
 const webOptions = { sandbox: true, contextIsolation: true, nodeIntegration: false }
 const control = controller(playerScript)
 const catalogViews = new Set()
-let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, folder
+let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, deviceMedia, folder
 let catalog, deviceCatalog, playbackRequest=0
 let networkSettings, networkRestartPending = false
 let sleepJob, sleepMinutes = null, sleepAtEnd = false
@@ -79,6 +80,24 @@ const inspectSource=(url,target)=>checkSource(url,{
 function rememberMedia(item) {
   applyProgress(item.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
   return {kind:'video',item}
+}
+function saveMediaLinks(records) {
+  sync.recordMedia(records)
+  if (media.apply(records)) notify({type:'library'})
+}
+function addDirectMedia(payload, recognizedURL) {
+  if (media===deviceMedia) return deviceMedia.addURL(recognizedURL,payload)
+  const input=String(payload.url ?? '').trim()
+  const source=/^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : 'https://'+input
+  const row=media.makeLink(source,payload)
+  saveMediaLinks([row])
+  media.annotate(row.id,typeof payload.imdb==='string' ? payload.imdb.trim() : null)
+  return media.detail(row.id)
+}
+function visibleLibrary() {
+  const snapshot=library.snapshot()
+  return {...snapshot,history:snapshot.history.filter(item=>!media.unavailable(item.url)),
+    lists:snapshot.lists.map(list=>({...list,items:Object.fromEntries(Object.entries(list.items).filter(([id])=>!media.unavailable(id)))}))}
 }
 
 async function chooseSourceFile(payload) {
@@ -151,6 +170,7 @@ function updateOutputMute(info) {
 }
 function videoCommand(action, value) {
   if (action === 'fullscreen') return fullscreen.toggle()
+  if (action === 'exit-fullscreen') return fullscreen.escape()
   if (action === 'mute' || action === 'volume' || action === 'set-volume') {
     if (action !== 'mute' && !Number.isFinite(value)) return false
     const level = action === 'mute' ? audio.level : action === 'volume' ? audio.level + value : value
@@ -184,7 +204,7 @@ async function checkpoint(info = playback) {
   if (!info?.frame || !info.resumed) return
   const frame = info.frame
   const value = await frame.executeJavaScript(readVideo).catch(() => null)
-  if (playback !== info || !value || value.error || !Number.isFinite(value.duration) ||
+  if (playback !== info || !value || value.error || value.seeking || !Number.isFinite(value.duration) ||
       value.time < 0 || !Number.isFinite(value.time)) return
   info.lastObserved = value
   if (value.time !== info.lastSaved || value.paused !== info.paused || value.ended !== info.ended) {
@@ -214,13 +234,15 @@ function applyProgress(records) {
 }
 
 function bindAccount(id) {
+  tv.close()
   ++playbackRequest
   stop()
   const location = id ? path.join(folder,'accounts',id) : folder
   fs.mkdirSync(location,{recursive:true})
   library = id ? openLibrary(location) : deviceLibrary
   catalog = id ? openCatalog(location,catalogOptions) : deviceCatalog
-  notify({type:'library'})
+  media = id ? openAccountMedia(location,deviceMedia) : deviceMedia
+  notify({type:'account-library'})
 }
 
 function setSleep(input) {
@@ -271,7 +293,7 @@ async function switchVariant(info, action, value) {
 }
 function resumeDetails(info, current=info.lastObserved) {
   return {...info.request,position:current?.time ?? info.resumePosition,
-    autoplay:current ? !current.paused : info.request.autoplay,skipped:info.skipped}
+    autoplay:current ? !current.paused : info.request.autoplay,skipped:info.skipped,audioChoice:info.audioChoice}
 }
 function recoverVariant(info, mediaFailed = false) {
   if (playback!==info || info.requestID!==playbackRequest || info.failed) return false
@@ -312,7 +334,7 @@ async function poll(info, view, token) {
       if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
       return
     }
-    const stalled=value.seeking || (!value.ended && !value.paused &&
+    const stalled=value.seeking || (!info.resumed && value.readyState<2) || (!value.ended && !value.paused &&
       (value.readyState<2 || Math.abs(value.time-(info.lastObserved?.time ?? -1))<.05))
     if (stalled) {
       if (now-(info.stalledAt ??= now)>mediaTimeout) return recoverVariant(info)
@@ -333,10 +355,15 @@ async function poll(info, view, token) {
     }
     if (!info.resumed) {
       const resume = Math.min(info.resumePosition,Math.max(0,value.duration-.1))
-      if (resume>0) await control(frame,'seek',resume)
+      if (value.readyState<2 || value.seeking) return
+      if (resume>0 && !info.resumeRequested) {
+        info.resumeRequested=true
+        if (!await control(frame,'seek',resume) && token===playToken) recoverVariant(info)
+        return
+      }
       if (token!==playToken) return
       info.resumed = true
-      info.lastObserved={...value,time:resume,paused:info.request.autoplay===false}
+      info.lastObserved={...value,paused:info.request.autoplay===false}
       fullscreen.update({ready:true})
       if (info.request.autoplay!==false) void control(frame,'play')
       return
@@ -374,10 +401,13 @@ async function poll(info, view, token) {
     }
   } finally { info.polling = false }
 }
+async function playbackDetails(details) {
+  return decodeTitle(details.url)?await catalog.playback(details.url,details.season,details.episode):
+    {title:media.detail(details.url),episode:media.episode(details.url,details.season,details.episode)}
+}
 async function startPlayer(details) {
   const request=++playbackRequest
-  const {title,episode}=decodeTitle(details.url)?await catalog.playback(details.url,details.season,details.episode):
-    {title:media.detail(details.url),episode:media.episode(details.url,details.season,details.episode)}
+  const {title,episode}=await playbackDetails(details)
   if (request!==playbackRequest || !win || win.isDestroyed()) return false
   const selection = {source:details.source ?? 0,quality:details.quality ?? 0}
   return mountVariant(title,episode,library.profile(),selection,details,request)
@@ -387,7 +417,8 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
   if (!variant) throw Error('Diese Quelle oder Qualitätsstufe ist nicht verfügbar.')
   stop(false)
   player = new WebContentsView({webPreferences:{...webOptions,enableBlinkFeatures:'AudioVideoTracks',
-    partition:'kino-public-player',preload:path.join(__dirname,'preload.cjs')}})
+    partition:'kino-public-player',preload:path.join(__dirname,'preload.cjs'),
+    ...(process.platform==='darwin' ? {backgroundThrottling:false} : {})}})
   player.setBackgroundColor('#000000')
   const view = player.webContents
   view.setWindowOpenHandler(()=>({action:'deny'}))
@@ -399,6 +430,7 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
     previous && !previous.finished?previous.time:0
   const info = playback = {contents:view,audioReady:false,title,episode,profile,selection,
     skipped:details.skipped instanceof Set ? details.skipped : new Set(),request:details,requestID,resumePosition,
+    audioChoice:details.audioChoice,
     attempted:details.attempted instanceof Set ? details.attempted : new Set(),resumed:false,lastSaved:0,
     mediaURL:variant.url,startedWithSecureDns:networkSettings.state().secureActive,
     stalledAt:Date.now(),markers:readSegments(null,local)}
@@ -414,7 +446,8 @@ function mountVariant(title,episode,profile,selection,details,requestID) {
   fullscreen.attach(player,{title:title.title+(title.isSeries?' · S'+episode.season+' F'+episode.episode:''),audio,
     sources:episode.sources.map(value=>({name:value.name,heights:value.variants.map(item=>item.height)})),
     ...selection,next:Boolean(nextEpisode(info)),sleep:sleepAtEnd?'episode':sleepMinutes,segments:[],
-    notice:details.notice ?? null,audioLanguage:deviceLibrary.audioLanguage()})
+    notice:details.notice ?? null,audioChoice:info.audioChoice,audioLanguage:deviceLibrary.audioLanguage(),
+    macOS:process.platform==='darwin'})
   void view.loadFile(path.join(__dirname,'media.html'),{hash:encodeURIComponent(variant.url)})
     .catch(()=>{if (token===playToken) recoverVariant(info)})
   timer=setInterval(()=>void poll(info,view,token).catch(()=>{}),750)
@@ -442,19 +475,32 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
       return videoCommand('seek',time)
     }
     if (payload.action === 'source' || payload.action === 'quality') return switchVariant(playback,payload.action,payload.value)
-    if (payload.action === 'audio-language') {
-      if (typeof payload.value!=='string') return false
-      const language=payload.value.trim().toLowerCase()
+    if (payload.action === 'audio-track') {
+      if (!playback || !payload.value || typeof payload.value.language!=='string' ||
+          typeof payload.value.label!=='string' || !Number.isInteger(payload.value.index) ||
+          payload.value.index<0 || payload.value.index>255) return false
+      const language=payload.value.language.trim().toLowerCase()
       if (language && (language.length>40 || !/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(language))) return false
-      deviceLibrary.setAudioLanguage(language)
-      fullscreen.update({audioLanguage:language})
+      playback.audioChoice={language,label:payload.value.label.trim().slice(0,100),index:payload.value.index}
+      if (language) deviceLibrary.setAudioLanguage(language)
+      fullscreen.update({audioChoice:playback.audioChoice,audioLanguage:deviceLibrary.audioLanguage()})
       return true
     }
     if (payload.action === 'sleep') return setSleep(payload.value)
-    if (['toggle','jump','seek','set-volume','mute','volume','fullscreen'].includes(payload.action)) return videoCommand(payload.action,payload.value)
+    if (['toggle','jump','seek','set-volume','mute','volume','fullscreen','exit-fullscreen'].includes(payload.action)) return videoCommand(payload.action,payload.value)
     return false
   }
   if (!win || event.sender !== win.webContents || event.senderFrame?.url !== win.webContents.getURL()) throw Error('Zugriff verweigert.')
+  if (action === 'tv-devices') return tv.list()
+  if (action === 'tv-play') {
+    const profile=library.profile()
+    const {title,episode}=await playbackDetails(payload)
+    if (profile!==library.profile()) throw Error('Das Profil hat sich geändert.')
+    const variant=episode?.sources.find(source=>source.variants.length)?.variants[0]
+    if (!variant) throw Error('Für diese Folge ist keine Videoquelle verfügbar.')
+    const saved=profile.history[title.url]?.episodes[episode.season+':'+episode.episode]
+    return tv.play(payload.target,variant.url,title.title,saved?.finished ? 0 : saved?.time)
+  }
   if (action === 'updates-state') return updater.state()
   if (action === 'updates-check') return updater.check()
   if (action === 'updates-install') return updater.install()
@@ -474,9 +520,32 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     return true
   }
   if (action === 'sync-state') return sync.status()
-  if (action === 'sync-sign-in') { await closePlayback(); return sync.signIn() }
+  if (action === 'sync-sign-in') { await closePlayback(); return sync.signIn(payload.method==='phone' ? 'phone' : 'browser') }
+  if (action === 'sync-phone-confirm') return sync.confirmPhone()
+  if (action === 'sync-phone-cancel') return sync.cancelPhone()
   if (action === 'sync-sign-out') { await closePlayback(); return sync.signOut() }
   if (action === 'sync-refresh') { await sync.exchange(); return sync.status() }
+  if (action === 'media-local-candidates') return media===deviceMedia ? [] : media.copyable()
+  if (action === 'media-copy-local') {
+    if (media===deviceMedia || !Array.isArray(payload.ids) || payload.ids.length>1000) {
+      throw Error('Wähle lokale Videolinks in deinem KinoTix-Konto.')
+    }
+    const records=media.copy(new Set(payload.ids))
+    if (records.length) {
+      saveMediaLinks(records)
+      applyProgress(records.map(row=>sync.remoteProgress(row.id)).filter(Boolean))
+    }
+    return records.length
+  }
+  if (action === 'media-remove-local') {
+    deviceMedia.removeLocal(payload.id)
+    return true
+  }
+  if (action === 'media-remove-link') {
+    if (media===deviceMedia) throw Error('Öffne dein KinoTix-Konto.')
+    saveMediaLinks([media.remove(payload.id)])
+    return true
+  }
   if (action === 'source-preview') {
     const {source,...result}=await inspectSource(payload.url,catalog)
     return result
@@ -485,7 +554,7 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     const target=catalog
     const result=await inspectSource(payload.url,target)
     if (target!==catalog) throw Error('Das Konto hat sich geändert. Prüfe die Adresse erneut.')
-    if (result.kind==='video') return rememberMedia(media.addURL(result.url,payload))
+    if (result.kind==='video') return rememberMedia(addDirectMedia(payload,result.url))
     if (result.kind==='catalog') {
       sync.recordCatalog(target.importSource(result.source))
       return {kind:'catalog'}
@@ -520,7 +589,13 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
       if (result.canceled) return null
       const filename=result.filePaths[0]
       item=path.extname(filename).toLowerCase()==='.json'?media.addList(filename):media.addFile(filename,payload)
-    } else item=media.addURL(payload.url,payload)
+    } else if (media!==deviceMedia) {
+      const target=catalog
+      const result=await inspectSource(payload.url,target)
+      if (target!==catalog) throw Error('Das Konto hat sich geändert. Prüfe die Adresse erneut.')
+      if (result.kind!=='video') throw Error(result.message)
+      item=addDirectMedia(payload,result.url)
+    } else item=deviceMedia.addURL(payload.url,payload)
     applyProgress(item.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
     return item
   }
@@ -534,8 +609,8 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     applyProgress(title.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
     return title
   }
-  if (action === 'history') return library.snapshot().history
-  if (action === 'library') return library.snapshot()
+  if (action === 'history') return visibleLibrary().history
+  if (action === 'library') return visibleLibrary()
   if (action === 'profile-new' || action === 'profile-select') {
     await closePlayback()
     setSleep(null)
@@ -591,17 +666,17 @@ function createWindow() {
   })
   let closing = false
   win.on('close', event => {
-    if (closing) return
+    if (closing || quitting) return
     event.preventDefault()
     closing = true
     void closePlayback().finally(() => {
       if (!win.isDestroyed()) win.close()
     })
   })
-  win.loadFile(path.join(__dirname,'index.html')).then(()=>updater.start()).catch(console.error)
+  win.loadFile(path.join(__dirname,'index.html')).catch(console.error)
 }
 app.on('second-instance', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus() } })
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   folder = app.getPath('userData')
   fs.mkdirSync(folder,{recursive:true})
   networkSettings = openNetworkSettings(folder, app)
@@ -616,24 +691,27 @@ app.whenReady().then(async () => {
     info.startupDnsError=true
   })
   library = deviceLibrary = openLibrary(folder)
-  media = openMedia(folder)
+  media = deviceMedia = openMedia(folder)
   catalog = deviceCatalog = openCatalog(folder,catalogOptions)
   audio = deviceLibrary.audio()
   let config
   try { config=JSON.parse(fs.readFileSync(path.join(__dirname,'supabase.json'),'utf8')) } catch {}
   sync = createAccountSync({folder,safeStorage,openExternal:url=>shell.openExternal(url),bind:bindAccount,apply:applyProgress,
-    applyCatalogs:items=>{if(catalog.apply(items)) notify({type:'library'})},notify,config})
-  await sync.start()
+    applyCatalogs:items=>{if(catalog.apply(items)) notify({type:'library'})},
+    applyMedia:items=>{if(media!==deviceMedia && media.apply(items)) notify({type:'library'})},notify,config})
   updater = createUpdater({app,notify})
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role:'appMenu' }, { role:'editMenu' }, { role:'viewMenu', submenu:[{ role:'togglefullscreen' }] }, { role:'windowMenu' },
   ]))
   createWindow()
+  updater.start()
+  void sync.start()
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow() })
 })
 let quitting = false
 app.on('before-quit', event => {
   if (quitting || !sync) return
+  tv.close()
   saveAudio()
   quitting=true
   event.preventDefault()

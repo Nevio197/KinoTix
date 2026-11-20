@@ -344,6 +344,7 @@ async function showAppSettings() {
     action('Verbindung',showNetworkSettings,'settings-row'))
   const updates = make('section','','settings-section')
   const progress = make('progress','','update-progress')
+  progress.hidden = true
   progress.max = 100
   progress.setAttribute('aria-label','Downloadfortschritt')
   const controls = make('div','','actions')
@@ -352,17 +353,19 @@ async function showAppSettings() {
     install.disabled=true
     if (!await request('updates-install')) install.disabled=false
   },'primary')
+  check.disabled = true
+  install.hidden = true
   controls.append(check,install)
   updates.append(make('h3','Software-Updates'),report,progress,controls)
   updateView = state => {
-    const messages={unconfigured:'Dieser Build hat keine Update-Quelle.',idle:'Sucht beim Start automatisch nach Updates.',
+    const messages={unconfigured:'Für automatische Updates installiere die GitHub-Ausgabe von KinoTix.',idle:'Sucht beim Start auf GitHub nach Updates.',
       checking:'Updates werden geprüft …',current:'KinoTix ist aktuell.',downloading:'Update '+(state.available||'')+' wird geladen · '+(state.percent??0)+' %',
       ready:'Version '+state.available+' ist bereit und wird beim Beenden installiert.',error:'Das Update konnte gerade nicht geladen werden.'}
     report.textContent='Version '+state.current+' · '+(messages[state.phase] || '')
     progress.hidden = state.phase !== 'downloading'
     progress.value = state.percent ?? 0
-    check.hidden = state.phase === 'ready' || state.phase === 'unconfigured'
-    check.disabled = state.phase === 'checking' || state.phase === 'downloading'
+    check.hidden = state.phase === 'ready'
+    check.disabled = ['unconfigured','checking','downloading'].includes(state.phase)
     install.hidden = state.phase !== 'ready'
   }
   dialog('Einstellungen',tools,updates)
@@ -431,6 +434,36 @@ async function showCatalogs() {
   dialog('Kataloge',view)
 }
 
+async function showLocalVideoLinks() {
+  const items=await request('media-local-candidates')
+  const choices=make('div','','stack')
+  const ids=new Set()
+  const copy=action('Auswahl ins Konto übernehmen',async()=>{
+    copy.disabled=true
+    try {
+      const count=await request('media-copy-local',{ids:[...ids]})
+      dialog('Videolinks übernommen',make('p',count===1?'Ein Videolink wurde ins Konto übernommen.':count+' Videolinks wurden ins Konto übernommen.'),
+        action('Zur Mediathek',async()=>{settings.close(); await showHome()}))
+    } finally { copy.disabled=ids.size===0 }
+  },'primary')
+  copy.disabled=true
+  for (const item of items) {
+    const check=make('input')
+    check.type='checkbox'
+    check.addEventListener('change',()=>{
+      if (check.checked) ids.add(item.id)
+      else ids.delete(item.id)
+      copy.disabled=ids.size===0
+    })
+    const label=make('label','','dns-option')
+    label.append(check,make('span',item.title+' · '+item.hostname))
+    choices.append(label)
+  }
+  if (!items.length) choices.append(make('p','Auf diesem Gerät sind keine weiteren übertragbaren Videolinks vorhanden.'))
+  dialog('Lokale Videolinks übernehmen',make('p','Wähle, welche Videolinks du auf deinen angemeldeten Geräten öffnen möchtest. Dateien, Medienlisten und der Gastverlauf bleiben lokal.'),
+    choices,...(items.length?[copy]:[]),action('Zurück',showAccount))
+}
+
 async function showAccount() {
   const view=make('div','','stack')
   function render(state) {
@@ -439,22 +472,40 @@ async function showAccount() {
     view.prepend(content)
     if (state.connected) {
       content.append(make('p','Angemeldet als '+state.email),
-        make('p',state.issue || (state.lastSync?'Kataloge und Fortschritt sind synchronisiert.':'Kataloge und Fortschritt werden synchronisiert …')),
+        make('p',state.issue || (state.lastSync?'Kataloge, Videolinks und Fortschritt sind synchronisiert.':'Kataloge, Videolinks und Fortschritt werden synchronisiert …')),
         make('p','Der Fortschritt von „Mein Profil“ wird synchronisiert. Weitere Profile bleiben auf diesem Gerät.'),
         action('Jetzt synchronisieren',async()=>render(await request('sync-refresh'))),
+        action('Lokale Videolinks ins Konto übernehmen',showLocalVideoLinks),
         action('Abmelden',async()=>{await request('sync-sign-out');settings.close();await showHome()}))
     } else {
-      content.append(make('p','Ohne Konto bleiben Kataloge, Merkliste und Verlauf auf diesem Gerät. Mit Google kannst du Kataloge und Wiedergabestand zwischen Windows und Mac synchronisieren.'))
+      content.append(make('p','Ohne Konto bleiben Kataloge, Merkliste und Verlauf auf diesem Gerät. Mit Google kannst du Kataloge, Videolinks und den Wiedergabestand zwischen deinen angemeldeten Geräten synchronisieren.'))
       if (state.issue) content.append(make('p',state.issue,'inline-error'))
       if (!state.configured) content.append(make('p','Die Google-Anmeldung ist für diesen Build noch nicht eingerichtet.'))
+      else if (state.restoring) content.append(make('p','Die gespeicherte Anmeldung wird geöffnet …'))
+      else if (state.phone) {
+        if (state.phone.email) {
+          content.append(make('p',state.phone.email),action('Mit diesem Konto verbinden',()=>request('sync-phone-confirm'),'primary'))
+        } else if (state.phone.image) {
+          const image=make('img')
+          image.src=state.phone.image
+          image.alt='QR-Code für die Google-Anmeldung'
+          image.className='sign-in-qr'
+          content.append(image,make('p','Scanne den Code mit dem Handy und bestätige dein Konto anschließend hier.'))
+        } else content.append(make('p','Anmeldecode wird angefordert …'))
+        content.append(action('Abbrechen',()=>request('sync-phone-cancel')))
+      }
       else if (state.signingIn) content.append(make('p','Schließe die Anmeldung im Browser ab.'))
       else content.append(action('Mit Google anmelden',async()=>{
         const next=await request('sync-sign-in')
         if (next.connected) { settings.close(); await showHome() }
-      },'primary'))
+      },'primary'),action('Mit Handy anmelden',async()=>{
+        const next=await request('sync-sign-in',{method:'phone'})
+        if (next.connected && settings.open) { settings.close(); await showHome() }
+      }))
     }
   }
   dialog('Google-Konto',view)
+  settings.addEventListener('close',()=>{void request('sync-phone-cancel')},{once:true})
   syncView=render
   render(await request('sync-state'))
 }
@@ -562,8 +613,19 @@ async function openTitle(item, resume = false) {
     if (next) {
       const label = data.isSeries ? 'Staffel ' + next.season + ' · Folge ' + next.episode : 'Abspielen'
       controls.append(iconAction('play',label,() => play(next),'primary'))
+      if (platform==='win32') controls.append(tvButton(data,next))
     }
     controls.append(action('Merken',() => chooseLists(data)))
+    if (data.url.startsWith('media:') && !data.accountLink) controls.append(action('Aus Mediathek entfernen',()=>{
+      dialog('Titel entfernen',make('p','„'+data.title+'“ aus der Mediathek auf diesem PC entfernen? Videodateien bleiben auf der Festplatte.'),
+        action('Entfernen',async()=>{await request('media-remove-local',{id:data.url}); settings.close(); await showHome()}),
+        action('Abbrechen',()=>settings.close()))
+    }))
+    if (data.accountLink) controls.append(action('Videolink aus Konto entfernen',()=>{
+      dialog('Videolink entfernen',make('p','Diesen Videolink aus deinem Konto und den angemeldeten Geräten entfernen? Eine lokale Kopie bleibt erhalten.'),
+        action('Aus Konto entfernen',async()=>{await request('media-remove-link',{id:data.url}); settings.close(); await showHome()}),
+        action('Abbrechen',()=>settings.close()))
+    }))
     const watchedFilm=record?.episodes[record.last]?.finished
     if (!data.isSeries && next) controls.append(action(watchedFilm ? 'Als ungesehen markieren' : 'Als gesehen markieren',async () => {
       await request('mark',{url:data.url,season:next.season,episode:next.episode,finished:!watchedFilm})
@@ -580,6 +642,31 @@ async function openTitle(item, resume = false) {
   }
 }
 function key(episode) { return episode.season + ':' + episode.episode }
+function tvButton(title,episode) {
+  const show = async () => {
+    const body=make('div','','stack')
+    const report=make('p','Suche nach DLNA-Fernsehern im selben Netzwerk …')
+    body.append(report)
+    dialog('Auf Fernseher abspielen',body)
+    try {
+      const devices=await request('tv-devices')
+      report.textContent=devices.length ? 'Wähle den Fernseher für '+title.title+'.' : 'Kein DLNA-Fernseher gefunden. Schalte den Fernseher ein und aktiviere bei Bedarf die Medienwiedergabe im Heimnetz.'
+      if (!devices.length) body.append(action('Erneut suchen',show))
+      for (const device of devices) {
+        body.append(action(device.name,async()=>{
+          for (const button of body.querySelectorAll('button')) button.disabled=true
+          report.textContent='Wiedergabe wird angefordert …'
+          try {
+            const result=await request('tv-play',{url:title.url,season:episode.season,episode:episode.episode,target:device.id})
+            report.textContent=result.name+' hat den Wiedergabebefehl angenommen.'+(result.resumed?' Die gespeicherte Position wurde übernommen.':'')
+          } catch(error) { report.textContent=cleanError(error) }
+          finally { for (const button of body.querySelectorAll('button')) button.disabled=false }
+        }))
+      }
+    } catch(error) { report.textContent=cleanError(error); body.append(action('Erneut suchen',show)) }
+  }
+  return action('Auf Fernseher abspielen',show)
+}
 function episodeSection(data, record, initialSeason) {
   const section = make('section')
   const heading = make('div', '', 'episode-header')
@@ -603,6 +690,7 @@ function episodeSection(data, record, initialSeason) {
       })
       mark.setAttribute('aria-label',(watched?.finished ? 'Als ungesehen markieren' : 'Als gesehen markieren')+' – Folge '+ep.episode)
       row.append(action(title,()=>play(ep)),mark)
+      if (platform==='win32') row.append(tvButton(data,ep))
       list.append(row)
     }
   }
@@ -648,6 +736,7 @@ async function play(episode) {
 status(message => {
   if (message.type === 'updater') { if (settings.open) updateView?.(message); return }
   if (message.type === 'sync') { if(settings.open) syncView?.(message); return }
+  if (message.type === 'account-library') { void showHome(); return }
   if (message.type === 'library') { if (!active && document.querySelector('#main .home-catalog')) void showHome(page); return }
   if (active && message.type==='player-back') void openTitle(detail)
 })
@@ -677,6 +766,7 @@ document.querySelector('#account').addEventListener('click',() => {
 document.querySelector('#collections').addEventListener('click',() => void showLists())
 document.querySelector('#home').addEventListener('click', () => showHome())
 document.querySelector('#home-tab').addEventListener('click', () => showHome())
+enableSearchSuggestions(query, term => request('search', {query:term}), item => openTitle(item))
 document.querySelector('#search').addEventListener('submit', event => {
   event.preventDefault()
   void showSearch(query.value.trim())
@@ -762,7 +852,7 @@ addForm.addEventListener('submit',event=>{event.preventDefault(); void checkSour
 sourceURL.addEventListener('input',resetSourcePreview)
 sourceFile.addEventListener('click',()=>void chooseSourceFile())
 sourceSave.addEventListener('click',()=>{
-  if (checkedSource) void addSource('source-add',{url:checkedSource.url,title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
+  if (checkedSource) void addSource('source-add',{url:sourceURL.value.trim(),title:addForm.elements.title.value,imdb:addForm.elements.imdb.value})
 })
 sourceNetwork.addEventListener('click',()=>{
   linkDialog.close()

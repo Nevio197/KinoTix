@@ -12,10 +12,11 @@ const preview = byID('seek-preview')
 const previewFrame = byID('preview-frame')
 const audioTrack = byID('audio-track')
 const audioTracks = video.audioTracks
+const pip = byID('pip')
 const languageLabels = new Intl.DisplayNames(['de'],{type:'language'})
 const labels={intro:'Intro',recap:'Rückblick',outro:'Abspann',post_credits:'Abspannszene'}
 let state = {}
-let panel, hideTimer, messageTimer, optionsKey, segmentsKey
+let panel, hideTimer, messageTimer, optionsKey, segmentsKey, videoClickTimer, rangePointer
 let audioTracksKey, audioChoiceMade=false
 let marks=[], previewMedia, previewTimer, previewTarget, pointerTime
 let previewUnavailable=false
@@ -55,11 +56,20 @@ function report(text) {
   if (text) messageTimer=setTimeout(()=>{message.hidden=true},5200)
 }
 const send = (action,value) => request('player-control',{action,value}).catch(error=>report(error.message))
+function controlsHeld() {
+  return rangePointer!==undefined || video.paused || panel || state.error || state.countdown ||
+    timeline.matches(':hover') || controls.querySelector(':focus-visible')
+}
 function wake() {
   clearTimeout(hideTimer)
   controls.classList.remove('asleep')
-  if (video.paused || panel || state.error || state.countdown || timeline.matches(':hover') || controls.querySelector(':focus-visible')) return
-  hideTimer=setTimeout(()=>controls.classList.add('asleep'),2700)
+  if (controlsHeld()) return
+  hideTimer=setTimeout(()=>{if (!controlsHeld()) controls.classList.add('asleep')},2700)
+}
+function releaseRange(event) {
+  if (event?.pointerId!==undefined && event.pointerId!==rangePointer) return
+  rangePointer=undefined
+  wake()
 }
 function format(value) {
   const seconds=Math.max(0,Math.floor(Number.isFinite(value)?value:0))
@@ -129,6 +139,7 @@ function updateOptions() {
 }
 function normalizedLanguage(value) {
   if (!value || value==='und') return ''
+  if (/^(de|deu|ger)(-|$)/i.test(value)) return 'de'
   try { return new Intl.Locale(value).language } catch { return '' }
 }
 function chooseAudio(index, tracks) {
@@ -138,15 +149,30 @@ function chooseAudio(index, tracks) {
   for (const track of tracks) if (track!==chosen && track.enabled) track.enabled=false
   return chosen.enabled
 }
+function preferredAudioIndex(tracks) {
+  const choice=state.audioChoice
+  if (choice) {
+    const sameLanguage=track=>normalizedLanguage(track?.language)===choice.language
+    const exact=track=>sameLanguage(track) && track?.label?.trim()===choice.label
+    if (choice.label) {
+      if (exact(tracks[choice.index])) return choice.index
+      const byLabel=tracks.findIndex(exact)
+      if (byLabel>=0) return byLabel
+    }
+    if (tracks[choice.index] && sameLanguage(tracks[choice.index])) return choice.index
+    return tracks.findIndex(sameLanguage)
+  }
+  const language=normalizedLanguage(state.audioLanguage) || 'de'
+  return tracks.findIndex(track=>normalizedLanguage(track.language)===language)
+}
 function updateAudioTracks() {
   const tracks=Array.from(audioTracks ?? [])
   byID('audio-field').hidden=tracks.length<2
   if (tracks.length<2) return
   const selected=tracks.findIndex(track=>track.enabled)
-  const prefer=normalizedLanguage(state.audioLanguage)
-  if (!audioChoiceMade && prefer && normalizedLanguage(tracks[selected]?.language)!==prefer) {
-    const index=tracks.findIndex(track=>normalizedLanguage(track.language)===prefer)
-    if (index>=0) { audioChoiceMade=true; chooseAudio(index,tracks) }
+  if (!audioChoiceMade && state.title && video.readyState>=1) {
+    const index=preferredAudioIndex(tracks)
+    if (index>=0 && (selected===index || chooseAudio(index,tracks))) audioChoiceMade=true
   }
   const current=tracks.findIndex(track=>track.enabled)
   const entries=tracks.map((track,index)=>{
@@ -199,9 +225,11 @@ function loadPreview() {
     previewMedia.src=video.currentSrc
   }
   if (previewMedia.readyState===0) return
-  previewTarget=Math.max(0,Math.min(pointerTime,previewMedia.duration-.05))
+  previewTarget=Math.max(.001,Math.min(pointerTime,previewMedia.duration-.05))
   if (!Number.isFinite(previewTarget)) return
-  if (Math.abs(previewMedia.currentTime-previewTarget)>.15) previewMedia.currentTime=previewTarget
+  if (previewMedia.readyState<2 || Math.abs(previewMedia.currentTime-previewTarget)>.15) {
+    previewMedia.currentTime=previewTarget
+  }
   else drawPreview()
 }
 function positionPreview(time) {
@@ -247,6 +275,7 @@ function togglePanel(name) {
 function render(next) {
   const previous=state
   state=next
+  document.body.classList.toggle('mac-player',state.macOS===true)
   byID('title').textContent=state.title || ''
   byID('next').hidden=!state.next
   byID('countdown').hidden=!state.countdown
@@ -296,7 +325,7 @@ audioTrack.addEventListener('change',()=>{
   const index=Number(audioTrack.value)
   audioChoiceMade=true
   if (!chooseAudio(index,tracks)) { report('Die Tonspur konnte nicht gewechselt werden.'); updateAudioTracks(); return }
-  void send('audio-language',normalizedLanguage(tracks[index].language))
+  void send('audio-track',{language:normalizedLanguage(tracks[index].language),label:tracks[index].label ?? '',index})
 })
 for (const event of ['addtrack','removetrack','change']) audioTracks?.addEventListener(event,updateAudioTracks)
 sleep.addEventListener('change',()=>{void send('sleep',sleep.value==='episode'?'episode':Number(sleep.value)||null);togglePanel('timer')})
@@ -305,40 +334,77 @@ seek.addEventListener('input',()=>updatePosition(Number(seek.value)))
 seek.addEventListener('change',()=>void send('seek',Number(seek.value)))
 timeline.addEventListener('pointermove',showPreview)
 timeline.addEventListener('pointerleave',()=>{hidePreview(); wake()})
-byID('pip').addEventListener('click',async()=>{
+pip.addEventListener('click',async()=>{
+  if (pip.dataset.pending==='true') return
+  if (!document.pictureInPictureElement &&
+      (!document.pictureInPictureEnabled || !video.videoWidth || !state.ready)) {
+    report('Bild-in-Bild ist für dieses Video gerade nicht verfügbar.')
+    return
+  }
+  pip.dataset.pending='true'
   try {
     if (document.pictureInPictureElement) await document.exitPictureInPicture()
     else await video.requestPictureInPicture()
   } catch { report('Bild-in-Bild ist für dieses Video gerade nicht verfügbar.') }
+  finally { delete pip.dataset.pending }
 })
-video.addEventListener('enterpictureinpicture',()=>{byID('pip').dataset.on='true'})
-video.addEventListener('leavepictureinpicture',()=>{byID('pip').dataset.on='false'})
+function updatePictureInPicture() {
+  const enabled=document.pictureInPictureElement===video
+  pip.dataset.on=String(enabled)
+  pip.setAttribute('aria-pressed',String(enabled))
+  const label=enabled?'Bild-in-Bild beenden':'Bild-in-Bild'
+  pip.setAttribute('aria-label',label)
+  pip.title=label
+  if (enabled && panel) togglePanel(panel)
+  wake()
+}
+pip.setAttribute('aria-pressed','false')
+video.addEventListener('enterpictureinpicture',updatePictureInPicture)
+video.addEventListener('leavepictureinpicture',updatePictureInPicture)
 for (const event of ['timeupdate','durationchange','loadedmetadata','seeked']) video.addEventListener(event,updateTime)
 video.addEventListener('loadedmetadata',updateOptions)
 video.addEventListener('loadedmetadata',updateAudioTracks)
 for (const event of ['playing','pause','ended']) video.addEventListener(event,updatePlayback)
-video.addEventListener('click',()=>{
+function playerClick() {
   if (panel) togglePanel(panel)
   else void send('toggle')
+}
+video.addEventListener('click',event=>{
+  if (!state.macOS) { playerClick(); return }
+  if (event.detail===1) videoClickTimer=setTimeout(playerClick,300)
 })
-video.addEventListener('dblclick',()=>void send('fullscreen'))
+video.addEventListener('dblclick',()=>{
+  clearTimeout(videoClickTimer)
+  void send('fullscreen')
+})
 document.addEventListener('pointermove',wake)
-document.addEventListener('pointerdown',wake)
+document.addEventListener('pointerdown',event=>{
+  if (event.button===0 && (event.target===seek || event.target===volume)) rangePointer=event.pointerId
+  wake()
+},{capture:true})
+document.addEventListener('pointerup',releaseRange,{capture:true})
+document.addEventListener('pointercancel',releaseRange,{capture:true})
+document.addEventListener('mouseup',releaseRange,{capture:true})
+window.addEventListener('blur',releaseRange)
 document.addEventListener('focusin',wake)
 document.addEventListener('focusout',()=>setTimeout(wake,0))
 document.addEventListener('keydown',event=>{
   wake()
   if (event.key==='Escape') {
-    if (panel) togglePanel(panel)
-    else if (state.fullscreen) void send('fullscreen')
+    if (panel || state.fullscreen) {
+      event.preventDefault()
+      if (panel) togglePanel(panel)
+      else if (!event.repeat) void send('exit-fullscreen')
+    }
     return
   }
-  if (event.altKey || event.ctrlKey || event.metaKey || /BUTTON|INPUT|SELECT/.test(event.target.tagName)) return
+  if (event.altKey || event.ctrlKey || event.metaKey || /INPUT|SELECT/.test(event.target.tagName)) return
   const command={ ' ':['toggle'],ArrowLeft:['jump',-10],ArrowRight:['jump',10],
     ArrowUp:['volume',.1],ArrowDown:['volume',-.1],m:['mute'],f:['fullscreen'],p:['pip'] }[event.key]
-  if (!command || command[0]==='fullscreen' && event.repeat) return
+  if (!command || event.target.tagName==='BUTTON' && !['fullscreen','pip'].includes(command[0]) ||
+      event.repeat && ['fullscreen','pip'].includes(command[0])) return
   event.preventDefault()
-  if (command[0]==='pip') byID('pip').click()
+  if (command[0]==='pip') pip.click()
   else void send(...command)
 })
 

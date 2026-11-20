@@ -212,3 +212,10 @@ dialog .actions { justify-content:flex-end }
   .import-card { min-height:65px }
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important } }
+
+#search { position:relative }
+.search-suggestions { position:absolute; top:100%; left:0; right:0; z-index:20; padding:4px; background:#171a21; border:1px solid #454a55; border-radius:8px; box-shadow:0 8px 24px #0008 }
+.search-suggestions button { display:block; width:100%; padding:9px 12px; text-align:left; color:#fff; background:transparent; border:0 }
+.search-suggestions button:hover, .search-suggestions button:focus-visible { background:#343b48 }
+
+.sign-in-qr { width:min(260px,100%); height:auto; image-rendering:pixelated }

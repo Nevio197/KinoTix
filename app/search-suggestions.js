@@ -1,4 +1,4 @@
-function enableSearchSuggestions(input, search, open) {
+function enableSearchSuggestions(input, searchLocal, search, open) {
   const form = input.form
   const results = document.createElement('div')
   results.className = 'search-suggestions'
@@ -19,9 +19,11 @@ function enableSearchSuggestions(input, search, open) {
     if (term.length < 2) return
     const current = generation
     timer = setTimeout(async () => {
-      try {
-        const items = await search(term)
+      let complete=false
+      const render=items=>{
         if (generation !== current || !form.contains(document.activeElement)) return
+        if (results.contains(document.activeElement)) return
+        results.replaceChildren()
         for (const item of items.slice(0, 5)) {
           const button = document.createElement('button')
           button.type = 'button'
@@ -30,7 +32,10 @@ function enableSearchSuggestions(input, search, open) {
           results.append(button)
         }
         results.hidden = !results.childElementCount
-      } catch { if (current === generation) clear() }
+      }
+      void searchLocal(term).then(items=>{if (!complete && items.length) render(items)}).catch(()=>{})
+      try { const items=await search(term);complete=true;render(items) }
+      catch { /* The saved results stay usable while offline. */ }
     }, 280)
   })
   form.addEventListener('submit', clear)

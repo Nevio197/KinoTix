@@ -68,9 +68,12 @@ async function networkIssue(error, url, detectBlock = blockedHost) {
   return {code:'connection',message:'Die Quelle ist gerade nicht erreichbar. ' + accessibleMessage}
 }
 
-async function request(url, fetcher, signal, detectBlock) {
+async function request(url, fetcher, signal, detectBlock, allowedHosts) {
   let target = url
   for (let count = 0; count < 6; count++) {
+    if (allowedHosts && !allowedHosts.includes(target.hostname)) {
+      return {issue:{code:'redirect',message:'Die Weiterleitung gehört nicht zu diesem Katalog.'}}
+    }
     if (await detectBlock(target.hostname)) return {issue:dnsRedirectIssue}
     let response
     try {
@@ -206,4 +209,4 @@ async function checkSource(value,{fetcher=fetch,detectBlock=blockedHost,verifyCa
   return result('invalid','Die Adresse liefert weder ein unterstütztes Video noch einen KinoTix-Katalog.')
 }
 
-module.exports = { checkSource, blockedHost, networkIssue, httpIssue, browserCheck, dnsRedirectIssue, isDnsError }
+module.exports = { checkSource, request, blockedHost, networkIssue, httpIssue, browserCheck, dnsRedirectIssue, isDnsError }

@@ -6,6 +6,7 @@ const { openLibrary } = require('./library.cjs')
 const { openMedia, openAccountMedia, formats } = require('./media.cjs')
 const { createAccountSync } = require('./account-sync.cjs')
 const { openCatalog } = require('./catalog.cjs')
+const { openSourceWindow } = require('./source-window.cjs')
 const { decodeTitle,https,catalogDomain } = require('./catalog-format.cjs')
 const { checkSource, blockedHost, browserCheck, isDnsError } = require('./source-check.cjs')
 const { openNetworkSettings } = require('./network-settings.cjs')
@@ -26,6 +27,7 @@ const control = controller(playerScript)
 const catalogViews = new Set()
 let updater, sync, win, fullscreen, player, playback, playToken, timer, library, deviceLibrary, media, deviceMedia, folder
 let catalog, deviceCatalog, playbackRequest=0
+let sourceWindow
 let networkSettings, networkRestartPending = false
 let sleepJob, sleepMinutes = null, sleepAtEnd = false
 let audio, audioSave
@@ -38,10 +40,6 @@ if (!app.requestSingleInstanceLock()) app.quit()
 
 function notify(value) {
   if (win && !win.isDestroyed()) win.webContents.send('player-status', value)
-}
-function searchTitles(query) {
-  const normalized = query.toLocaleLowerCase('de-DE')
-  return media.all().filter(item => item.title.toLocaleLowerCase('de-DE').includes(normalized))
 }
 function makeCatalogView(partition,topHosts,resourceHosts) {
   const permitted=(value,hosts)=>{
@@ -70,6 +68,7 @@ function makeCatalogView(partition,topHosts,resourceHosts) {
 }
 const catalogOptions={
   makeView:makeCatalogView,
+  makeParser:()=>makeCatalogView('kinotix-static-parser',[],[]),
   fetcher:(url,options)=>net.fetch(url,options),
   detectBlock:hostname=>networkSettings.state().secureActive ? false : blockedHost(hostname),
   withDnsFallback:(operation,resultCode)=>networkSettings.withDnsFallback(operation,resultCode),
@@ -239,6 +238,7 @@ function applyProgress(records) {
 }
 
 function bindAccount(id) {
+  sourceWindow?.view.destroy()
   tv.close()
   ++playbackRequest
   stop()
@@ -581,8 +581,32 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     return {kind:'catalog'}
   }
   if (action === 'catalog-home') return catalog.home()
+  if (action === 'catalog-saved') return catalog.shelfRows()
+  if (action === 'catalog-browse') return catalog.browse(payload.id,payload.page)
+  if (action === 'catalog-cover') return catalog.cover(payload.url)
   if (action === 'catalog-state') return {sources:catalog.list(),available:catalog!==deviceCatalog && catalog.missingFrom(deviceCatalog).length>0}
-  if (action === 'catalog-open-browser') return shell.openExternal(catalog.browserAddress(payload.id,payload.title))
+  if (action === 'catalog-show-site') {
+    const address=catalog.browserAddress(payload.id,payload.title)
+    if (sourceWindow?.id===payload.id && new URL(sourceWindow.address).origin===new URL(address).origin) {
+      const {view}=sourceWindow
+      if (view.webContents.getURL()!==address) await view.loadURL(address)
+      if (!view.isDestroyed()) view.focus()
+      return
+    }
+    sourceWindow?.view.destroy()
+    const target=catalog, profile=library.profile()
+    const {view,ready}=openSourceWindow(win,address,(url,label)=>{
+      if (target!==catalog || profile!==library.profile()) throw Error('Das Profil hat sich geändert. Öffne die Seite erneut.')
+      const title=catalog.pageBookmark(payload.id,url,label)
+      const list=profile.lists.find(list=>list.id==='default') || profile.lists[0]
+      if (!list.items[title.url]) library.toggle(list,title)
+      notify({type:'library'})
+    })
+    sourceWindow={view,address,id:payload.id}
+    view.once('closed',()=>{if (sourceWindow?.view===view) sourceWindow=undefined})
+    await ready
+    return
+  }
   if (action === 'catalog-import') {
     const result=await dialog.showOpenDialog(win,{properties:['openFile'],filters:[{name:'Katalogdatei',extensions:['json']}]})
     if (result.canceled) return false
@@ -592,6 +616,7 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   }
   if (action === 'catalog-remove') {
     sync.recordCatalog(catalog.remove(payload.id))
+    if (sourceWindow?.id===payload.id) sourceWindow.view.destroy()
     return true
   }
   if (action === 'catalog-copy-local' && catalog!==deviceCatalog) {
@@ -617,11 +642,21 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     return item
   }
   if (action === 'home') return media.all()
-  if (action === 'search') {
+  if (action === 'search' || action === 'search-local') {
     const query=String(payload.query ?? '').trim().slice(0,125)
-    const local=searchTitles(query)
+    const terms=query.toLocaleLowerCase('de-DE').normalize('NFD').replace(/\p{Diacritic}/gu,'').split(/\s+/).filter(Boolean)
+    const known=[...media.all(),...catalog.shelfRows().flatMap(source=>source.items)]
+    const local=known.filter(item=>{
+      const name=item.title.toLocaleLowerCase('de-DE').normalize('NFD').replace(/\p{Diacritic}/gu,'')
+      return terms.every(term=>name.includes(term))
+    })
+    if (action==='search-local') return local.slice(0,100)
     const {items,issues}=await catalog.searchResults(query)
-    const entries=[...local,...items].slice(0,80)
+    const unique=new Map()
+    for (const row of [...local.filter(row=>!decodeTitle(row.url)),...items,...local]) {
+      if (!unique.has(row.url)) unique.set(row.url,row)
+    }
+    const entries=[...unique.values()].slice(0,100)
     return payload.reportIssues ? {items:entries,issues} : entries
   }
   if (action === 'title') {
@@ -629,7 +664,11 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
     try { title=await getTitle(payload.url) }
     catch (error) {
       const ref=decodeTitle(payload.url)
-      if (payload.reportIssues && ref && error.code) return {id:ref.id,issue:error.message,issueCode:error.code}
+      if (payload.reportIssues && ref && error.code) {
+        const saved=library.profile().lists.map(list=>list.items[payload.url]).find(Boolean) ||
+          library.profile().history[payload.url] || catalog.shelfRows().find(row=>row.id===ref.id)?.items.find(row=>row.url===payload.url)
+        return {id:ref.id,issue:error.message,issueCode:error.code,saved}
+      }
       throw error
     }
     applyProgress(title.episodes.map(entry=>sync.remoteProgress(entry.id)).filter(Boolean))
@@ -638,6 +677,7 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   if (action === 'history') return visibleLibrary().history
   if (action === 'library') return visibleLibrary()
   if (action === 'profile-new' || action === 'profile-select') {
+    sourceWindow?.view.destroy()
     await closePlayback()
     setSleep(null)
     const snapshot=action==='profile-new'?library.addProfile(String(payload.name).trim()):library.select(payload.id)
@@ -645,8 +685,11 @@ ipcMain.handle('kino', async (event, action, payload = {}) => {
   }
   if (action === 'list-add') return library.addList(String(payload.name).trim())
   if (action === 'list-toggle') {
-    const list = library.profile().lists.find(entry => entry.id === payload.list)
-    const title = await getTitle(payload.url)
+    const profile=library.profile()
+    const list = profile.lists.find(entry => entry.id === payload.list)
+    const saved=profile.lists.map(entry=>entry.items[payload.url]).find(Boolean)
+    const title = saved || await getTitle(payload.url)
+    if (profile!==library.profile()) throw Error('Das Profil hat sich geändert.')
     if (!list || !title) throw Error('Die Liste oder der Titel fehlt.')
     return library.toggle(list,title)
   }

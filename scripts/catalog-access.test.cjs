@@ -8,6 +8,7 @@ const {openCatalog} = require('../app/catalog.cjs')
 const {titleID} = require('../app/catalog-format.cjs')
 const {browserCheck,checkSource} = require('../app/source-check.cjs')
 const fixture = require('../examples/katalog.json')
+const {readSitemap}=require('../app/catalog-sitemap.cjs')
 
 function setup(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(),'kinotix-catalog-'))
@@ -99,4 +100,60 @@ test('catalog search keeps partial results and can recover after an index failur
   assert.equal(full.items.length,2)
   assert.deepEqual(full.issues,[])
   assert.deepEqual(await catalog.searchResults('absent'),{items:[],issues:[]})
+})
+
+test('namespace-aware search index accepts split UTF-8 and excludes image entries',async()=>{
+  const rows=[]
+  const bytes=Buffer.from('<s:urlset xmlns:s="urn:site" xmlns:i="urn:image"><s:url><i:loc>cover</i:loc><s:loc>https://example.org/Grün&amp;Meer</s:loc></s:url></s:urlset>')
+  const chunks=Array.from(bytes,byte=>Uint8Array.of(byte))
+  await readSitemap(chunks,value=>rows.push(value))
+  assert.deepEqual(rows,['https://example.org/Grün&Meer'])
+  for (const xml of ['<!DOCTYPE urlset><urlset/>','<urlset><url></urlset>','<html><urlset/></html>']) {
+    await assert.rejects(readSitemap([Buffer.from(xml)],()=>{}),/XML/)
+  }
+})
+
+test('a denied static catalog read never starts a renderer or a secondary request',async t=>{
+  let reads=0
+  const catalog=setup(t,{makeView:()=>assert.fail('unexpected navigation'),makeParser:()=>assert.fail('unexpected parsing'),
+    fetcher:async(_url,options)=>{
+      reads++
+      assert.equal(options.credentials,'omit')
+      return new Response('Checking',{status:403,headers:{'cf-mitigated':'challenge'}})
+    }})
+  catalog.importSource(fixture)
+  assert.equal((await catalog.home())[0].issueCode,'browser-check')
+  assert.equal(reads,1)
+})
+
+test('ranked index, pagination and device previews survive an outage without keeping removed catalogs',async t=>{
+  const folder=fs.mkdtempSync(path.join(os.tmpdir(),'kinotix-shelves-'))
+  t.after(()=>fs.rmSync(folder,{recursive:true,force:true}))
+  let available=true
+  const options={detectBlock:()=>false,makeParser:()=>{
+    const parser=new EventEmitter()
+    parser.loadURL=async()=>{}
+    parser.executeJavaScriptInIsolatedWorld=async()=>({ready:true,items:[{url:fixture.origin+'/film',title:'Katalogfilm',poster:'https://images.example/poster.jpg'}]})
+    parser.isDestroyed=()=>false;parser.close=()=>{}
+    return parser
+  },fetcher:async url=>{
+    if (!available) return new Response(null,{status:403,headers:{'cf-mitigated':'challenge'}})
+    if (url!==fixture.index) return new Response('<article>Film</article>',{headers:{'content-type':'text/html'}})
+    const paths=[...Array.from({length:125},(_,index)=>'extra-testfilm-'+index),'testfilm','testfilm-zwei']
+    return new Response('<urlset>'+paths.map(slug=>'<url><loc>'+fixture.origin+'/'+slug+'</loc></url>').join('')+'</urlset>',{headers:{'content-type':'application/xml'}})
+  }}
+  const first=openCatalog(folder,options)
+  first.importSource(fixture)
+  assert.equal((await first.searchResults('testfilm')).items[0].title,'Testfilm')
+  const pages=await Promise.all([1,2,3].map(page=>first.browse(fixture.id,page)))
+  assert.equal(new Set(pages.flatMap(page=>page.items.map(row=>row.url))).size,128)
+  assert.equal(pages[2].items.length,32)
+  available=false
+  const reopened=openCatalog(folder,options)
+  const [shelf]=await reopened.home()
+  assert.equal(shelf.issueCode,'browser-check')
+  assert.equal(shelf.items[0].title,'Katalogfilm')
+  assert.ok(shelf.savedAt>0)
+  reopened.remove(fixture.id)
+  assert.deepEqual(openCatalog(folder,options).shelfRows(),[])
 })

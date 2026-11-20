@@ -1,14 +1,16 @@
 const fs=require('node:fs')
 const path=require('node:path')
+const {readSitemap}=require('./catalog-sitemap.cjs')
 const {createHash}=require('node:crypto')
 const {setTimeout:delay}=require('node:timers/promises')
 const {https,config,catalogDomain,defaultDomainSource,decodeTitle,titleID,episodeID,catalogRecord}=require('./catalog-format.cjs')
-const {blockedHost,networkIssue,httpIssue,browserCheck,dnsRedirectIssue}=require('./source-check.cjs')
+const {request,blockedHost,networkIssue,httpIssue,browserCheck,dnsRedirectIssue}=require('./source-check.cjs')
 
 const reader=fs.readFileSync(path.join(__dirname,'catalog-reader.js'),'utf8')
 const reliableID=value=>typeof value==='string' && /^tt\d{7,12}$/.test(value)?value:undefined
 const clean=(value,max)=>typeof value==='string'?value.trim().slice(0,max):''
 const normalize=value=>value.toLocaleLowerCase('de-DE').normalize('NFD').replace(/\p{Diacritic}/gu,'')
+const byTitle=new Intl.Collator('de',{numeric:true})
 
 function sourceError(code,message) {
   return Object.assign(new Error(message),{code})
@@ -32,7 +34,7 @@ function cleanRow(raw,source) {
     provider:source.name,isSeries:raw.isSeries===true || Boolean(source.detail.seriesPrefix && url.pathname.startsWith(source.detail.seriesPrefix))}
 }
 
-function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,withDnsFallback=operation=>operation()}) {
+function openCatalog(folder,{makeView,makeParser,fetcher=fetch,detectBlock=blockedHost,withDnsFallback=operation=>operation()}) {
   const filename=path.join(folder,'catalogs.json')
   const records=new Map()
   try {
@@ -44,12 +46,43 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
   const visible=()=>[...records.values()].filter(record=>!record.removed).map(record=>record.source)
   const sourceByOrigin=origin=>visible().find(source=>source.origin===origin)
   const titles=new Map(), listing=new Map(), index=new Map(), videos=new Map()
+  const shelves=new Map(), covers=new Map(), coverBlocked=new Map(), directories=new Map()
+  const shelfFile=path.join(folder,'katalogvorschau.json')
+  const fingerprint=source=>createHash('sha256').update(JSON.stringify(source)).digest('hex')
+  try {
+    const saved=JSON.parse(fs.readFileSync(shelfFile,'utf8'))
+    for (const source of visible()) {
+      const shelf=saved[source.id]
+      if (shelf?.fingerprint!==fingerprint(source) || !Array.isArray(shelf.items) || !Number.isFinite(shelf.savedAt)) continue
+      const items=[]
+      for (const row of shelf.items.slice(0,200)) {
+        const ref=decodeTitle(row?.url)
+        const item=ref?.id===source.id && cleanRow({...row,url:webURL(source,ref.pathname)},source)
+        if (item) items.push(item)
+      }
+      if (items.length) shelves.set(source.id,{...shelf,items})
+    }
+  } catch {}
+  function saveShelves() {
+    try {
+      fs.writeFileSync(shelfFile+'.tmp',JSON.stringify(Object.fromEntries(shelves)),{mode:0o600})
+      fs.renameSync(shelfFile+'.tmp',shelfFile)
+    } catch (error) { console.warn('Katalogvorschau konnte nicht gespeichert werden:',error.code) }
+  }
+  function shelfRows() {
+    return visible().map(source=>({id:source.id,name:source.name,items:shelves.get(source.id)?.items || [],
+      savedAt:shelves.get(source.id)?.savedAt,hasIndex:Boolean(source.index)}))
+  }
   const findSource=id=>records.get(id)?.source
   const save=()=>{
     fs.writeFileSync(filename+'.tmp',JSON.stringify([...records.values()]),{mode:0o600})
     fs.renameSync(filename+'.tmp',filename)
   }
   function clear(id) {
+    directories.delete(id)
+    coverBlocked.delete(id)
+    if (shelves.delete(id)) saveShelves()
+    for (const key of covers.keys()) if (decodeTitle(key)?.id===id) covers.delete(key)
     listing.delete(id)
     index.delete(id)
     for (const key of titles.keys()) if (decodeTitle(key)?.id===id) titles.delete(key)
@@ -99,8 +132,57 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     return url
   }
 
+  async function staticPage(source,address,rules) {
+    const hosts=rules.player?[...source.playerHosts,...source.mediaHosts]:[new URL(source.origin).hostname,...source.catalogHosts]
+    const url=safeURL(address,hosts)
+    if (!url) throw Error('Die Quelle hat eine ungültige Adresse.')
+    const {response,target,issue}=await request(url,fetcher,AbortSignal.timeout(10000),detectBlock,hosts)
+    if (issue) throw sourceError(issue.code,issue.message)
+    const type=(response.headers.get('content-type') || '').toLowerCase().split(';')[0].trim()
+    if (rules.player && type.startsWith('video/') && source.mediaHosts.includes(target.hostname)) {
+      await response.body?.cancel()
+      return [{height:0,url:target.href}]
+    }
+    const limit=2*1024*1024
+    if (!response.body || Number(response.headers.get('content-length'))>limit ||
+        !['','text/html','application/xhtml+xml','text/plain'].includes(type)) {
+      await response.body?.cancel()
+      throw sourceError('incompatible','Die Quelle liefert keine unterstützte Katalogseite.')
+    }
+    const charset=response.headers.get('content-type')?.match(/charset\s*=\s*["']?([^;"'\s]+)/i)?.[1]
+    let decoder
+    try { decoder=new TextDecoder(charset || 'utf-8') } catch { decoder=new TextDecoder() }
+    let bytes=0, html=''
+    for await (const chunk of response.body) {
+      bytes+=chunk.byteLength
+      if (bytes>limit) throw sourceError('incompatible','Die Katalogseite ist größer als 2 MB.')
+      html+=decoder.decode(chunk,{stream:true})
+    }
+    html+=decoder.decode()
+    const parser=makeParser()
+    let timeout
+    try {
+      const read=async()=>{
+        await parser.loadURL('about:blank')
+        const args=[rules,html,target.href].map(value=>JSON.stringify(value)).join(',')
+        return parser.executeJavaScriptInIsolatedWorld(1001,[{code:reader+'('+args+')'}])
+      }
+      return await Promise.race([read(),new Promise((_,reject)=>{
+        timeout=setTimeout(()=>reject(sourceError('timeout','Die Katalogseite braucht zu lange zum Verarbeiten.')),5000)
+      })])
+    } finally {
+      clearTimeout(timeout)
+      if (!parser.isDestroyed()) parser.close()
+    }
+  }
   function read(source,address,rules,accept) {
-    return withDnsFallback(()=>readOnce(source,address,rules,accept))
+    return withDnsFallback(async()=>{
+      if (makeParser) {
+        const value=await staticPage(source,address,rules)
+        if (accept(value) && (!rules.detail || value.episodes?.length) && (!rules.listing || value.items?.length)) return value
+      }
+      return readOnce(source,address,rules,accept)
+    })
   }
   async function readOnce(source,address,rules,accept) {
     const mainHosts=rules.player?[...source.playerHosts,...source.mediaHosts]:
@@ -143,6 +225,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
       const item=cleanRow(raw,source)
       if (item && !seen.has(item.url)) seen.set(item.url,item)
     }
+    if (!seen.size) throw sourceError('incompatible','Der Katalog hat keine passenden Titel geliefert.')
     return [...seen.values()]
   }
   async function homeOne(source) {
@@ -150,21 +233,32 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     if (cached && cached.until>Date.now()) return cached.operation
     const entry={until:Date.now()+120000,operation:loadListing(source)}
     listing.set(source.id,entry)
-    try { return await entry.operation }
+    try {
+      const items=await entry.operation
+      if (findSource(source.id)===source && listing.get(source.id)===entry) {
+        const preview=items.map(row=>({...row,poster:row.poster && !new URL(row.poster).search ? row.poster : ''}))
+        shelves.set(source.id,{fingerprint:fingerprint(source),savedAt:Date.now(),items:preview})
+        saveShelves()
+      }
+      return items
+    }
     catch (error) {
       if (listing.get(source.id)===entry) listing.delete(source.id)
+      if (findSource(source.id)===source && ['browser-check','rate-limit','forbidden','blocked'].includes(error.code))
+        coverBlocked.set(source.id,Date.now()+300000)
       throw error
     }
   }
   async function readIndex(source) {
     if (!source.index) return []
-    if (!index.has(source.id)) {
+    const cached=index.get(source.id)
+    if (!cached || cached.until<=Date.now()) {
       const operation=(async()=>{
         const url=new URL(source.index)
         const response=await withDnsFallback(async()=>{
           if (await detectBlock(url.hostname)) throw sourceError(dnsRedirectIssue.code,dnsRedirectIssue.message)
           try {
-            return await fetcher(url.href,{redirect:'error',signal:AbortSignal.timeout(8000)})
+            return await fetcher(url.href,{redirect:'error',credentials:'omit',signal:AbortSignal.timeout(8000)})
           } catch (error) {
             const {code,message}=await networkIssue(error,url,detectBlock)
             throw sourceError(code,message)
@@ -175,35 +269,25 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
           await response.body?.cancel().catch(()=>{})
           throw issue ? sourceError(issue.code,issue.message) : sourceError('index','Die Quelle hat keinen XML-Suchindex geliefert.')
         }
-        let bytes=0, xml=''
-        const decoder=new TextDecoder()
-        for await (const chunk of response.body) {
-          bytes+=chunk.byteLength
-          if (bytes>14*1024*1024) throw Error('Der Suchindex ist zu groß.')
-          xml+=decoder.decode(chunk,{stream:true})
-        }
-        xml+=decoder.decode()
-        if (!/<(?:[\w.-]+:)?urlset(?:\s|\/?>)/i.test(xml)) throw sourceError('index','Die Quelle hat keinen XML-Suchindex geliefert.')
-        const results=[]
-        for (const match of xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)) {
-          const url=safeURL(match[1].trim())
-          if (!url) continue
+        const results=new Map()
+        await readSitemap(response.body,address=>{
+          const url=safeURL(address)
+          if (!url) return
           try {
             const slug=decodeURIComponent(url.pathname.split('/').filter(Boolean).at(-1) ?? '')
               .replace(/^\d+-/,'').replace(/\.[a-z]{2,5}$/i,'').replace(/[-_]+/g,' ')
             const item=cleanRow({url:url.href,title:slug.charAt(0).toUpperCase()+slug.slice(1)},source)
-            if (item) results.push(item)
+            if (item) results.set(item.url,item)
           } catch {}
-          if (results.length>=80000) break
-        }
-        return results
+        })
+        return [...results.values()]
       })().catch(error=>{
-        if (index.get(source.id)===operation) index.delete(source.id)
+        if (index.get(source.id)?.operation===operation) index.delete(source.id)
         throw error
       })
-      index.set(source.id,operation)
+      index.set(source.id,{operation,until:Date.now()+120000})
     }
-    return index.get(source.id)
+    return index.get(source.id).operation
   }
   async function title(url) {
     const ref=decodeTitle(url)
@@ -216,6 +300,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     const response=await read(source,address,{detail:source.detail},value=>value?.ready && typeof value.title==='string')
     const meta=cleanRow({...response,url:address},source)
     if (!meta) throw Error('Der Katalog hat keinen Titel geliefert.')
+    if (!meta.poster) meta.poster=shelves.get(source.id)?.items.find(item=>item.url===url)?.poster || ''
     const allowed=[...source.playerHosts,...source.mediaHosts]
     const episodes=[]
     for (const row of (Array.isArray(response.episodes)?response.episodes:[]).slice(0,2500)) {
@@ -226,6 +311,7 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     }
     episodes.sort((a,b)=>a.season-b.season || a.episode-b.episode)
     const value={...meta,imdb:reliableID(response.imdb),description:clean(response.description,600),episodes}
+    if (findSource(source.id)!==source) throw Error('Der Katalog wurde geändert.')
     titles.set(url,{until:Date.now()+600000,value})
     return value
   }
@@ -262,7 +348,8 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     return result
   }
   async function searchResults(query) {
-    const terms=normalize(query).split(/\s+/).filter(Boolean)
+    const phrase=normalize(query.trim()).replace(/\s+/g,' ')
+    const terms=phrase.split(' ').filter(Boolean)
     const found=new Map(), issues=[]
     if (terms.length) {
       const responses=await Promise.all(visible().map(async source=>({
@@ -278,18 +365,69 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
             continue
           }
           for (const item of part.value) {
-            if (found.size>=60) break
-            if (!found.has(item.url) && terms.every(term=>normalize(item.title).includes(term))) found.set(item.url,item)
+            if (found.has(item.url)) continue
+            const name=normalize(item.title)
+            if (terms.every(term=>name.includes(term))) {
+              const rank=name===phrase?0:name.startsWith(phrase+' ')?1:name.includes(phrase)?2:3
+              found.set(item.url,{item,rank})
+            }
           }
         }
       }
     }
-    return {items:[...found.values()],issues}
+    const matches=[...found.values()].sort((a,b)=>a.rank-b.rank || a.item.title.length-b.item.title.length ||
+      a.item.title.localeCompare(b.item.title,'de') || a.item.url.localeCompare(b.item.url))
+    return {items:matches.slice(0,100).map(match=>match.item),issues}
   }
   return {
     records:()=>[...records.values()],apply,importFile,importSource,
     missingFrom:other=>other.records().filter(row=>row.source && !findSource(row.id)).map(row=>row.source),
-    browserAddress,searchResults,
+    browserAddress,searchResults,shelfRows,
+    pageBookmark(id,address,label) {
+      const source=findSource(id)
+      const url=safeURL(address)
+      if (!source || url?.origin!==source.origin || url.pathname==='/' || url.search) throw Error('Öffne zuerst die Seite eines Titels.')
+      const known=shelves.get(id)?.items.find(row=>row.url===titleID(id,url.pathname))
+      if (known) return known
+      const item=cleanRow({title:label,url:url.href},source)
+      if (!item) throw Error('Diese Seite hat keinen speicherbaren Titel.')
+      return item
+    },
+    async browse(id,page) {
+      const source=findSource(id)
+      if (!source) throw Error('Der Katalog wurde entfernt.')
+      const listing=await homeOne(source).catch(()=>shelves.get(id)?.items || [])
+      const entries=await readIndex(source)
+      if (findSource(id)!==source) throw Error('Der Katalog wurde geändert.')
+      let directory=directories.get(id)
+      if (!directory || directory.listing!==listing || directory.entries!==entries) {
+        const rows=new Map(listing.map(item=>[item.url,item]))
+        for (const entry of entries) if (!rows.has(entry.url)) rows.set(entry.url,entry)
+        const all=[...rows.values()].sort((a,b)=>byTitle.compare(a.title,b.title) || a.url.localeCompare(b.url))
+        directory={all,listing,entries}
+        directories.set(id,directory)
+      }
+      const all=directory.all
+      const pages=Math.max(1,Math.ceil(all.length/48))
+      const current=Math.max(1,Math.min(Number.isSafeInteger(page)?page:1,pages))
+      return {name:source.name,items:all.slice((current-1)*48,current*48),page:current,pages,total:all.length}
+    },
+    async cover(url) {
+      const ref=decodeTitle(url),source=ref && findSource(ref.id)
+      if (!source || !makeParser || !source.detail.poster || coverBlocked.get(ref.id)>Date.now()) return ''
+      const cached=covers.get(url)
+      if (cached && cached.until>Date.now()) return cached.operation
+      const operation=withDnsFallback(()=>staticPage(source,webURL(source,ref.pathname),{cover:source.detail.poster}))
+        .then(value=>findSource(ref.id)===source ? safeURL(value)?.href || '' : '')
+        .catch(error=>{
+          if (findSource(ref.id)===source && ['browser-check','rate-limit','forbidden','blocked','dns-blocked'].includes(error.code))
+            coverBlocked.set(ref.id,Date.now()+300000)
+          return ''
+        })
+      if (covers.size>=512) covers.delete(covers.keys().next().value)
+      covers.set(url,{until:Date.now()+300000,operation})
+      return operation
+    },
     sourceByOrigin,
     async resolveDomain(value,device,discover) {
       const origin=catalogDomain(value)
@@ -308,8 +446,9 @@ function openCatalog(folder,{makeView,fetcher=fetch,detectBlock=blockedHost,with
     list:()=>visible().map(source=>({id:source.id,name:source.name,origin:source.origin})),
     async home() {
       return Promise.all(visible().map(async source=>{
-        try { return {id:source.id,name:source.name,items:await homeOne(source)} }
-        catch (e) { return {id:source.id,name:source.name,items:[],issue:e.message,issueCode:e.code} }
+        try { return {id:source.id,name:source.name,items:await homeOne(source),hasIndex:Boolean(source.index)} }
+        catch (e) { const shelf=shelves.get(source.id)
+          return {id:source.id,name:source.name,items:shelf?.items || [],savedAt:shelf?.savedAt,hasIndex:Boolean(source.index),issue:e.message,issueCode:e.code} }
       }))
     },
     async search(query) { return (await searchResults(query)).items },

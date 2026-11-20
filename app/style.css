@@ -105,6 +105,9 @@ main.loading { display:grid; place-content:center }
 .progress-block progress::-webkit-progress-value,.history-progress::-webkit-progress-value { background:var(--accent); border-radius:5px }
 .progress-block .remain { font-size:.85rem; color:#d5e0f4; font-weight:510 }
 .section-title { margin:0 0 15px; font-size:clamp(1.35rem,2.1vw,1.8rem) }
+.shelf-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:15px }
+.shelf-header .section-title { margin:0 }
+.shelf-header button { flex-shrink:0 }
 .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(148px,1fr)); gap:16px; align-items:stretch }
 .card { position:relative; display:flex; flex-direction:column; justify-content:flex-start; min-width:0; width:100%; height:100%; padding:0; gap:0; border-radius:14px; overflow:hidden; text-align:left; background:#141923; box-shadow:0 5px 18px #0003 }
 .card:hover { border-color:#c9dffa51; background:#1b2230; transform:translateY(-3px); box-shadow:0 12px 24px #0006 }

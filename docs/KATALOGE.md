@@ -4,6 +4,10 @@
 
 Für einen Katalog ohne Datei gib unter **Hinzufügen** die Domain ein und wähle **Domain als Katalog hinzufügen**. Das geht auch unter **Einstellungen → Kataloge**. Eine bereits auf diesem Gerät eingerichtete Domain behält ihre Regeln für Titel, Suche und Wiedergabe. Bei neuen Domains verwendet KinoTix einen von der Seite verknüpften Katalog oder sucht nach Titelkarten und Videos auf derselben Domain. Die Domain bleibt auch bei einem Verbindungsfehler gespeichert. Zum Anzeigen der Titel muss die Seite erreichbar sein und passende Daten liefern.
 
+Unter **Alle Titel** kannst du einen Katalog mit Suchindex seitenweise durchblättern. Die Suche zeigt bereits geladene Titel sofort und ergänzt Treffer aus dem Index. Fehlt einer sichtbaren Kachel das Cover, prüft KinoTix das Vorschaubild auf der Titelseite. Beim nächsten Start stehen die zuletzt geladenen Katalogkacheln bereits auf dem Gerät bereit. Das Datum über den Kacheln zeigt den Stand der gespeicherten Vorschau.
+
+Verlangt der Anbieter eine Browserprüfung, öffnet **Quellseite in KinoTix ansehen** seine Website in einem eigenen KinoTix-Fenster. Dort kannst du eine geöffnete Titelseite über **Merkliste → Aktuellen Titel merken** speichern. Beim Anschauen auf der Website steuert der Anbieter die Wiedergabe. KinoTix speichert die Zeitposition beim Abspielen im eigenen Player.
+
 Unter **Einstellungen → Verbindung** ist **Automatisch** die Voreinstellung. KinoTix beginnt mit dem System-DNS. Scheitert die Namensauflösung, versucht die App dieselbe Adresse erneut mit verschlüsseltem DNS über Cloudflare. Nach einem Neustart beginnt die Automatik wieder mit dem System-DNS. Die HTTPS-Zertifikatsprüfung bleibt aktiv.
 
 Du kannst auch **System-DNS** oder **Immer sicheres DNS** auswählen. Diese Einstellung bleibt auf dem Gerät und gilt ab dem nächsten Start der App. Frühere manuelle Einstellungen werden übernommen.

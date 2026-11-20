@@ -57,14 +57,46 @@ function imageFor(item, className = '', loading = 'lazy') {
   image.src = item.poster
   return image
 }
+const pendingCovers=new Map()
+const coverItems=new WeakMap()
+let loadingCovers=0
+const visibleCovers=new IntersectionObserver(entries=>{
+  for (const entry of entries) {
+    if (entry.isIntersecting) pendingCovers.set(entry.target,coverItems.get(entry.target))
+    else pendingCovers.delete(entry.target)
+  }
+  loadCovers()
+},{root:main})
+function loadCovers() {
+  while (loadingCovers<2 && pendingCovers.size) {
+    const [container,item]=pendingCovers.entries().next().value
+    pendingCovers.delete(container)
+    visibleCovers.unobserve(container)
+    if (!container.isConnected || !item) continue
+    loadingCovers++
+    void request('catalog-cover',{url:item.url}).then(poster=>{
+      if (!container.isConnected || !poster || poster===item.poster) return
+      const image=imageFor({...item,poster})
+      image.addEventListener('error',()=>container.replaceChildren(icon('play')),{once:true})
+      container.replaceChildren(image)
+    }).catch(()=>{}).finally(()=>{loadingCovers--;loadCovers()})
+  }
+}
 function art(item) {
   const container = make('span', '', 'card-art')
+  const missing=()=>{
+    container.replaceChildren(icon('play'))
+    if (item.url?.startsWith('catalog:')) {
+      coverItems.set(container,item)
+      visibleCovers.observe(container)
+    }
+  }
   if (!item.poster) {
-    container.append(icon('play'))
+    missing()
     return container
   }
   const image = imageFor(item)
-  image.addEventListener('error', () => { container.replaceChildren(icon('play')) }, { once:true })
+  image.addEventListener('error', missing, { once:true })
   container.append(image)
   return container
 }
@@ -205,10 +237,11 @@ function catalogNotice(source,retry,titleRef) {
   const block=notice(source.name,source.issue,retry)
   const buttons=block.querySelector('.actions')
   if (source.issueCode==='browser-check') {
-    buttons.append(action('Im Browser öffnen',()=>request('catalog-open-browser',{id:source.id,title:titleRef})))
+    buttons.append(action('Quellseite in KinoTix ansehen',()=>request('catalog-show-site',{id:source.id,title:titleRef})))
   } else if (['dns','dns-blocked'].includes(source.issueCode)) {
     buttons.append(action('Verbindungseinstellungen',showNetworkSettings))
   } else buttons.append(action('Andere Quelle hinzufügen',openImport))
+  if (source.hasIndex && !source.items?.length && !titleRef) buttons.append(action('Titelverzeichnis ansehen',()=>showCatalog(source.id,1)))
   return block
 }
 async function refreshLibrary() {
@@ -222,6 +255,8 @@ async function refreshLibrary() {
 }
 function reset(section = main.dataset.section || 'home') {
   viewId += 1
+  visibleCovers.disconnect()
+  pendingCovers.clear()
   observePlayer?.disconnect()
   observePlayer = null
   if (active) {
@@ -243,6 +278,7 @@ async function showHome(newPage = 1) {
   returnTo = () => showHome()
   page = newPage
   const remote = request('catalog-home').catch(()=>[])
+  const saved = request('catalog-saved').catch(()=>[])
   const own = request('home',{page}).then(items=>({items}),error=>({items:[],error}))
   const catalogState = request('catalog-state').catch(()=>({sources:[]}))
   await refreshLibrary()
@@ -257,7 +293,7 @@ async function showHome(newPage = 1) {
   if (fresh.length) main.append(group('Neue Folgen',fresh,item => openTitle(item)))
   const catalog = make('section','','home-catalog')
   main.append(catalog)
-  const [local,configured] = await Promise.all([own,catalogState])
+  const [local,configured,previews] = await Promise.all([own,catalogState,saved])
   if (id!==viewId) return
   if (local.error) catalog.append(notice('Mediathek vorübergehend nicht erreichbar',cleanError(local.error),()=>showHome(page)))
   if (local.items.length) {
@@ -274,16 +310,46 @@ async function showHome(newPage = 1) {
   const loading = make('p','Kataloge werden geladen …','shelf-note')
   loading.setAttribute('role','status')
   if (configured.sources.length) catalog.append(loading)
+  const shelves=make('div')
+  for (const source of previews) if (source.items.length) shelves.append(sourceShelf(source))
+  main.append(shelves)
   const sources = await remote
   if (id!==viewId) return
   loading.remove()
+  shelves.replaceChildren()
   const firstTitle = sources.find(source=>source.items.length)?.items[0]
   if (!resume && !local.items.length && firstTitle) main.prepend(feature(firstTitle))
   for (const source of sources) {
-    if (source.items.length) main.append(group(source.name,source.items,item=>openTitle(item)))
-    else if (source.issue) main.append(catalogNotice(source,()=>showHome(page)))
+    if (source.items.length) shelves.append(sourceShelf(source))
+    if (source.issue) shelves.append(catalogNotice(source,()=>showHome(page)))
   }
   catalog.hidden = !catalog.childElementCount
+}
+function sourceShelf(source) {
+  const section=group(source.name,source.items,item=>openTitle(item))
+  const heading=section.querySelector('h2')
+  const header=make('div','','shelf-header')
+  heading.replaceWith(header)
+  header.append(heading)
+  if (source.hasIndex) header.append(action('Alle Titel',()=>showCatalog(source.id,1)))
+  if (source.savedAt) header.after(make('p','Zuletzt geladen am '+new Date(source.savedAt).toLocaleString('de-DE'),'shelf-note'))
+  return section
+}
+async function showCatalog(source,page) {
+  const id=reset('home')
+  returnTo=()=>showCatalog(source,page)
+  main.append(action('← Startseite',()=>showHome(),'detail-bar'),make('p','Titel werden geladen …','shelf-note'))
+  try {
+    const data=await request('catalog-browse',{id:source,page})
+    if (id!==viewId) return
+    const paging=make('div','','actions')
+    if (data.page>1) paging.append(action('Vorherige Seite',()=>showCatalog(source,data.page-1)))
+    paging.append(make('span',data.total+' Titel · Seite '+data.page+' von '+data.pages,'shelf-note'))
+    if (data.page<data.pages) paging.append(action('Nächste Seite',()=>showCatalog(source,data.page+1)))
+    main.replaceChildren(action('← Startseite',()=>showHome(),'detail-bar'),paging,group(data.name,data.items,item=>openTitle(item)))
+  } catch(error) {
+    if (id===viewId) main.replaceChildren(action('← Startseite',()=>showHome(),'detail-bar'),notice('Titelverzeichnis konnte nicht geladen werden',cleanError(error),()=>showCatalog(source,page)))
+  }
 }
 function cleanError(error) { return (error?.message || 'Unbekannter Fehler.').replace(/^Error invoking remote method '[^']+': Error: /, '') }
 function searchable(value) { return value.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '') }
@@ -302,14 +368,23 @@ async function showSearch(value) {
   returnTo = () => showSearch(value)
   const results = make('section')
   main.append(results)
+  const remote=request('search',{query:value,reportIssues:true})
+  const label=value ? 'Ergebnisse für „'+value+'“' : 'Suchergebnisse'
+  let finished=false
+  void request('search-local',{query:value}).then(items=>{
+    if (!finished && id===viewId && items.length) results.replaceChildren(group(label,items,item=>openTitle(item)))
+  }).catch(()=>{})
   try {
-    const {items,issues} = await request('search', {query:value,reportIssues:true})
+    const {items,issues} = await remote
+    finished=true
     if (id !== viewId) return
-    if (items.length) results.append(group(value ? 'Ergebnisse für „'+value+'“' : 'Suchergebnisse',items,item => openTitle(item)))
+    results.replaceChildren()
+    if (items.length) results.append(group(label,items,item => openTitle(item)))
     for (const source of issues) results.append(catalogNotice(source,()=>showSearch(value)))
     if (!items.length && !issues.length) results.append(notice('Keine Treffer', 'Suche nach einem Titel in deiner Medienbibliothek.'))
   } catch (e) {
-    if (id === viewId) results.replaceChildren(notice('Suche fehlgeschlagen',cleanError(e),()=>showSearch(value)))
+    finished=true
+    if (id === viewId) results.append(notice('Suche fehlgeschlagen',cleanError(e),()=>showSearch(value)))
   }
 }
 const settings = document.querySelector('#settings-dialog')
@@ -608,8 +683,20 @@ async function openTitle(item, resume = false) {
     const [data, records] = await Promise.all([request('title', {url:item.url,reportIssues:true}), request('history')])
     if (id !== viewId) return
     if (data.issue) {
-      main.replaceChildren(action('← Zurück',goBack,'detail-bar'),
-        catalogNotice({...data,name:item.title || 'Titel konnte nicht geladen werden'},()=>openTitle(item,resume),item.url))
+      main.replaceChildren(action('← Zurück',goBack,'detail-bar'))
+      if (data.saved) {
+        const hero=make('section','','hero hero-detail')
+        heroArtwork(hero,data.saved)
+        const info=make('div','','hero-content')
+        info.append(make('h1',data.saved.title,'hero-title'),make('p','Gespeicherter Titel','hero-meta'))
+        if (data.saved.description) info.append(make('p',data.saved.description,'lead'))
+        const controls=make('div','','actions')
+        controls.append(action('Auf der Quellseite ansehen',()=>request('catalog-show-site',{id:data.id,title:item.url}),'primary'))
+        if (library?.lists.some(list=>list.items[item.url])) controls.append(action('Listen bearbeiten',()=>chooseLists(data.saved)))
+        info.append(controls)
+        hero.append(info)
+        main.append(hero,notice('Aktuelle Titeldaten fehlen',data.issue,()=>openTitle(item,resume)))
+      } else main.append(catalogNotice({...data,name:item.title || 'Titel konnte nicht geladen werden'},()=>openTitle(item,resume),item.url))
       return
     }
     detail = data
@@ -784,7 +871,7 @@ document.querySelector('#account').addEventListener('click',() => {
 document.querySelector('#collections').addEventListener('click',() => void showLists())
 document.querySelector('#home').addEventListener('click', () => showHome())
 document.querySelector('#home-tab').addEventListener('click', () => showHome())
-enableSearchSuggestions(query, term => request('search', {query:term}), item => openTitle(item))
+enableSearchSuggestions(query,term=>request('search-local',{query:term}),term=>request('search',{query:term}),item=>openTitle(item))
 document.querySelector('#search').addEventListener('submit', event => {
   event.preventDefault()
   void showSearch(query.value.trim())
